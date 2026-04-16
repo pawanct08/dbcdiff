@@ -1,0 +1,41 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECM TCU BCM ABS
+
+BO_ 256 EngineStatus: 8 ECM
+ SG_ EngineRPM : 0|16@1+ (0.5,0) [0|8000] "rpm" TCU,BCM
+ SG_ CoolantTemp : 16|8@1+ (1,-40) [-40|215] "degC" BCM
+ SG_ ThrottlePos : 24|8@1+ (0.4,0) [0|100] "%" TCU
+ SG_ EngineLoad : 32|8@1+ (0.4,0) [0|100] "%" TCU
+
+BO_ 513 TransmissionStatus: 8 TCU
+ SG_ GearPosition : 0|4@1+ (1,0) [0|15] "" ECM
+ SG_ TorqueReq : 8|16@1+ (0.1,0) [0|500] "Nm" ECM
+
+BO_ 1024 BodyControl: 4 BCM
+ SG_ HeadlightState : 0|2@1+ (1,0) [0|3] "" ECM
+
+BO_ 1280 ABSControl: 4 ABS
+ SG_ WheelSpeedFL : 0|16@1+ (0.01,0) [0|250] "km/h" ECM
+
+BA_DEF_ BO_ "BusType" STRING;
+BA_DEF_ SG_ "SystemSignalLongSymbol" STRING;
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+
+BA_DEF_DEF_ "BusType" "";
+BA_DEF_DEF_ "SystemSignalLongSymbol" "";
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+
+BA_ "GenMsgCycleTime" BO_ 256 10;
+BA_ "GenMsgCycleTime" BO_ 513 20;
+
+CM_ BU_ ECM "Engine Control Module (updated)";
+CM_ BU_ TCU "Transmission Control Unit";
+CM_ BO_ 256 "Engine operating status signals";
+CM_ SG_ 256 EngineRPM "Current engine speed in RPM";
+CM_ SG_ 256 CoolantTemp "Engine coolant temperature";
+
