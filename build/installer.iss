@@ -14,7 +14,7 @@
 #define AppName      "dbcdiff"
 #define AppVersion   "0.2.0"
 #define AppPublisher "C T"
-#define AppURL       "https://github.com/pcw1kor/dbcdiff"
+#define AppURL       "https://github.com/pawanct08/dbcdiff"
 #define AppExeName   "dbcdiff.exe"
 #define AppExeSrc    "..\dist\dbcdiff.exe"
 
