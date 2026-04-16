@@ -51,6 +51,7 @@ try {
         "--python-flag=no_docstrings",
         "--python-flag=no_asserts",
         "--lto=yes",                            # link-time optimisation
+        "--assume-yes-for-downloads",           # auto-accept all Nuitka download prompts
         # Optional: obfuscation pass (comment out if it causes issues)
         # "--obfuscate-source",
         $entryPoint
@@ -63,7 +64,7 @@ try {
     if (Test-Path $exe) {
         $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
         Write-Host ""
-        Write-Host "✔  Protected build complete: $exe  (${size} MB)" -ForegroundColor Green
+        Write-Host "[OK] Protected build complete: $exe  (${size} MB)" -ForegroundColor Green
     } else {
         Write-Error "Build finished but exe not found at $exe"
     }
