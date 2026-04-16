@@ -428,13 +428,14 @@ class ResultsTable(QTableWidget):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self) -> None:
+    def __init__(self, preload_a: str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("dbcdiff — DBC File Comparator")
         self.resize(1280, 800)
         self._entries: list[DiffEntry] = []
         self._thread: Optional[QThread] = None
         self._active_filter = "ALL"
+        self._preload_a = preload_a
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -454,6 +455,14 @@ class MainWindow(QMainWindow):
         title_col.addWidget(sub_lbl)
         title_row.addLayout(title_col)
         title_row.addStretch()
+
+        sig_lbl = QLabel("⚡ Crafted with precision · by C T")
+        sig_lbl.setStyleSheet(
+            "color:#3fb950; font-size:11px; font-style:italic; letter-spacing:0.5px;"
+        )
+        sig_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        title_row.addWidget(sig_lbl)
+
         root.addLayout(title_row)
 
         # ── Drop zones ────────────────────────────────────────────────────────
@@ -527,6 +536,14 @@ class MainWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Ready — drop two DBC files or use Browse…")
+
+        _perm = QLabel("  ⚡ by C T  ")
+        _perm.setStyleSheet("color:#3fb950; font-size:10px; font-style:italic;")
+        self._status.addPermanentWidget(_perm)
+
+        # Pre-load file supplied via --file-a (Explorer context menu)
+        if self._preload_a:
+            self._zone_a._set_file(self._preload_a)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -612,7 +629,7 @@ class MainWindow(QMainWindow):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def launch_gui() -> None:
+def launch_gui(preload_a: str | None = None) -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("dbcdiff")
     app.setApplicationVersion("0.2.0")
@@ -631,7 +648,7 @@ def launch_gui() -> None:
     palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
     app.setPalette(palette)
 
-    win = MainWindow()
+    win = MainWindow(preload_a=preload_a)
     win.show()
     sys.exit(app.exec())
 
