@@ -4,20 +4,21 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "dbcdiff"
-version = "0.1.0"
+version = "0.2.0"
 description = "Semantically compare two CAN .dbc database files"
 readme = "README.md"
 license = { file = "LICENSE" }
 keywords = ["canbus", "dbc", "diff", "automotive", "cantools"]
 authors = [{ name = "pawanct08", email = "ctpawan08@gmail.com" }]
 requires-python = ">=3.10"
-dependencies = ["cantools>=41.0"]
+dependencies = ["cantools>=41.0", "PySide6>=6.5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov"]
 
 [project.scripts]
 dbcdiff = "dbcdiff.cli:main"
+dbcdiff-gui = "dbcdiff.gui:launch_gui"
 
 [project.urls]
 Repository = "https://github.com/pawanct08/dbcdiff"

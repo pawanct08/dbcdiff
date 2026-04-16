@@ -125,7 +125,7 @@ document.querySelector('[data-sev="all"]').classList.add('active');
 
 
 def write_html(entries: list[DiffEntry], fp: TextIO,
-               old_path: str = "", new_path: str = "") -> None:
+               file_a: str = "", file_b: str = "") -> None:
     sev_counts = {
         "breaking":   sum(1 for e in entries if e.severity == Severity.BREAKING),
         "functional": sum(1 for e in entries if e.severity == Severity.FUNCTIONAL),
@@ -156,9 +156,9 @@ def write_html(entries: list[DiffEntry], fp: TextIO,
   <div>
     <h1>&#127891; dbcdiff Report</h1>
     <div class="subtitle">
-      <strong>OLD:</strong> {html.escape(old_path or '(unknown)')}
-      &nbsp;→&nbsp;
-      <strong>NEW:</strong> {html.escape(new_path or '(unknown)')}
+      <strong>File A:</strong> {html.escape(file_a or '(unknown)')}
+      &nbsp;vs&nbsp;
+      <strong>File B:</strong> {html.escape(file_b or '(unknown)')}
     </div>
   </div>
 </header>
@@ -192,8 +192,9 @@ def write_html(entries: list[DiffEntry], fp: TextIO,
       <th>Kind</th>
       <th>Entity</th>
       <th>Path</th>
-      <th>Old Value</th>
-      <th>New Value</th>
+      <th>File A Value</th>
+      <th>File B Value</th>
+      <th>Protocol</th>
     </tr>
   </thead>
   <tbody>
@@ -218,8 +219,9 @@ def _build_rows(entries: list[DiffEntry]) -> str:
         }.get(e.severity, "metadata")
         sev_badge, _ = _SEV_BADGE.get(e.severity, ("", ""))
         kind_badge = _KIND_BADGE.get(e.kind, e.kind)
-        old_v = _fmt_val(e.old_value)
-        new_v = _fmt_val(e.new_value)
+        old_v = _fmt_val(e.value_a)
+        new_v = _fmt_val(e.value_b)
+        proto = html.escape(e.protocol) if e.protocol else '<span style="color:#8b949e">—</span>'
         parts.append(
             f'<tr data-sev="{sev_key}">'
             f'<td>{sev_badge}</td>'
@@ -228,6 +230,7 @@ def _build_rows(entries: list[DiffEntry]) -> str:
             f'<td class="path">{html.escape(e.path)}</td>'
             f'<td class="old">{old_v}</td>'
             f'<td class="new">{new_v}</td>'
+            f'<td class="path">{proto}</td>'
             f'</tr>'
         )
     return "\n    ".join(parts)

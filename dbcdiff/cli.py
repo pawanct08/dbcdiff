@@ -17,7 +17,7 @@ import os
 import cantools
 
 from . import __version__
-from .engine import diff_databases, Severity, max_severity, ADDED, REMOVED, CHANGED
+from .engine import compare_databases, diff_databases, Severity, max_severity, ADDED, REMOVED, CHANGED
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +82,8 @@ Severity levels:
   metadata    – comments, names, units — no parsing impact
 """,
     )
-    p.add_argument("old", metavar="OLD.dbc", help="Baseline DBC file")
-    p.add_argument("new", metavar="NEW.dbc", help="Updated DBC file")
+    p.add_argument("file_a", metavar="FILE_A.dbc", help="First DBC file")
+    p.add_argument("file_b", metavar="FILE_B.dbc", help="Second DBC file")
     p.add_argument(
         "--severity",
         choices=["breaking", "functional", "metadata", "all"],
@@ -134,11 +134,13 @@ def _print_entries(entries, use_colour: bool, severity_filter: str) -> None:
         kind_lbl = _KIND_LABEL.get(e.kind, e.kind)
         col = _SEV_COLOUR.get(e.severity, "reset")
         line = f"  [{_colour(sev_lbl, col, use_colour)}] {_bold(e.entity, use_colour)} · {e.path}  {kind_lbl}"
-        if e.old_value is not None and e.new_value is not None:
+        if e.value_a is not None and e.value_b is not None:
             line += (
-                f"\n      old: {_colour(str(e.old_value), 'red', use_colour)}"
-                f"  →  new: {_colour(str(e.new_value), 'green', use_colour)}"
+                f"\n      File A: {_colour(str(e.value_a), 'red', use_colour)}"
+                f"  →  File B: {_colour(str(e.value_b), 'green', use_colour)}"
             )
+        if e.protocol:
+            line += f"  [{e.protocol}]"
         if e.detail:
             line += f"\n      {e.detail}"
         print(line)
@@ -178,25 +180,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Load databases ---
     try:
-        db_old = cantools.database.load_file(args.old)
+        db_a = cantools.database.load_file(args.file_a)
     except Exception as exc:
-        print(f"Error loading OLD file '{args.old}': {exc}", file=sys.stderr)
+        print(f"Error loading File A '{args.file_a}': {exc}", file=sys.stderr)
         return 4
 
     try:
-        db_new = cantools.database.load_file(args.new)
+        db_b = cantools.database.load_file(args.file_b)
     except Exception as exc:
-        print(f"Error loading NEW file '{args.new}': {exc}", file=sys.stderr)
+        print(f"Error loading File B '{args.file_b}': {exc}", file=sys.stderr)
         return 4
 
     # --- Diff ---
-    entries = diff_databases(db_old, db_new)
+    entries = compare_databases(db_a, db_b, path_a=args.file_a, path_b=args.file_b)
 
     # --- Terminal output ---
     print(
         _bold("dbcdiff", use_colour)
-        + f"  OLD: {_colour(args.old, 'cyan', use_colour)}"
-        + f"  NEW: {_colour(args.new, 'cyan', use_colour)}"
+        + f"  File A: {_colour(args.file_a, 'cyan', use_colour)}"
+        + f"  File B: {_colour(args.file_b, 'cyan', use_colour)}"
     )
     _print_entries(entries, use_colour, args.severity)
     _print_summary(entries, use_colour)
@@ -219,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.html_out:
         from .reporters.html_reporter import write_html
         with open(args.html_out, "w", encoding="utf-8") as fp:
-            write_html(entries, fp, old_path=args.old, new_path=args.new)
+            write_html(entries, fp, file_a=args.file_a, file_b=args.file_b)
         print(f"HTML → {args.html_out}")
 
     if args.csv_out:

@@ -9,11 +9,15 @@ from typing import TextIO
 from ..engine import DiffEntry, Severity, max_severity
 
 
-def write_json(entries: list[DiffEntry], fp: TextIO, pretty: bool = True) -> None:
+def write_json(entries: list[DiffEntry], fp: TextIO, pretty: bool = True,
+               path_a: str = "", path_b: str = "") -> None:
+    ms = max_severity(entries)
     payload = {
         "summary": {
+            "file_a": path_a,
+            "file_b": path_b,
             "total_changes": len(entries),
-            "max_severity": max_severity(entries).name,
+            "max_severity": ms.name if ms else "IDENTICAL",
             "breaking":   sum(1 for e in entries if e.severity == Severity.BREAKING),
             "functional":  sum(1 for e in entries if e.severity == Severity.FUNCTIONAL),
             "metadata":   sum(1 for e in entries if e.severity == Severity.METADATA),

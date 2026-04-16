@@ -9,7 +9,7 @@ from typing import TextIO
 from ..engine import DiffEntry
 
 
-FIELDNAMES = ["entity", "kind", "severity", "path", "old_value", "new_value", "detail"]
+FIELDNAMES = ["entity", "kind", "severity", "path", "value_a", "value_b", "protocol", "detail"]
 
 
 def write_csv(entries: list[DiffEntry], fp: TextIO) -> None:
