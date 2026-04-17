@@ -320,6 +320,59 @@ def _main_baseline(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Convert subcommand  (DBC ↔ Excel)
+# ---------------------------------------------------------------------------
+
+def _main_convert(argv: list[str]) -> int:
+    """Dispatch ``dbcdiff convert SOURCE [-o OUTPUT]``."""
+    import argparse as _ap
+    from pathlib import Path
+
+    p = _ap.ArgumentParser(
+        prog="dbcdiff convert",
+        description="Convert DBC ↔ Excel.  Direction is auto-detected from the "
+                    "source file extension (.dbc → .xlsx, .xlsx/.xls → .dbc).",
+    )
+    p.add_argument("source",
+                   help="Source file to convert (.dbc or .xlsx/.xls)")
+    p.add_argument("-o", "--output",
+                   help="Output path (default: same name, switched extension)")
+
+    args = p.parse_args(argv)
+    src = Path(args.source)
+    ext = src.suffix.lower()
+
+    if args.output:
+        out = Path(args.output)
+    elif ext == ".dbc":
+        out = src.with_suffix(".xlsx")
+    elif ext in (".xlsx", ".xls"):
+        out = src.with_suffix(".dbc")
+    else:
+        print(f"ERROR: unsupported source extension '{ext}'.  "
+              "Expected .dbc, .xlsx, or .xls.", file=sys.stderr)
+        return 1
+
+    from .converter import dbc_to_excel, excel_to_dbc
+
+    try:
+        if ext == ".dbc":
+            print(f"Converting DBC → Excel :  {src}  →  {out}")
+            dbc_to_excel(str(src), str(out))
+        else:
+            print(f"Converting Excel → DBC :  {src}  →  {out}")
+            excel_to_dbc(str(src), str(out))
+        print("Done.")
+        return 0
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -328,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
     _argv = argv if argv is not None else sys.argv[1:]
     if _argv and _argv[0] == "baseline":
         return _main_baseline(_argv[1:])
+    if _argv and _argv[0] == "convert":
+        return _main_convert(_argv[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)

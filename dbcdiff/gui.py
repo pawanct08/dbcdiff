@@ -15,7 +15,8 @@ from PySide6.QtGui import (
     QFont, QIcon,
 )
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame,
+    QApplication, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QStackedWidget, QStatusBar, QTableWidget,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 
 import cantools
 from .engine import compare_databases, max_severity, Severity, DiffEntry
+from .converter import dbc_to_excel, excel_to_dbc
 
 # ---------------------------------------------------------------------------
 # Severity display map  (enum name → display_label, bg, fg)
@@ -909,6 +911,287 @@ class _Worker(QObject):
 
 
 # ---------------------------------------------------------------------------
+# License dialog
+# ---------------------------------------------------------------------------
+
+_LICENSE_TEXT = """\
+MIT License
+
+Copyright (c) 2024  Pawan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+"""
+
+
+class LicenseDialog(QDialog):
+    """Shown at startup — user must accept before the application opens."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("dbcdiff – License Agreement")
+        self.setMinimumSize(640, 480)
+        # Disable the ✕ close button so Decline is the only exit path
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # ── contributor banner ───────────────────────────────────────────────
+        contrib = QLabel("Contributor:  <b style='color:#58a6ff;'>Pawan</b>")
+        contrib.setStyleSheet("font-size: 15px; padding: 6px 0;")
+        layout.addWidget(contrib)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #30363d;")
+        layout.addWidget(sep)
+
+        # ── license text ─────────────────────────────────────────────────────
+        title_lbl = QLabel("License Agreement")
+        title_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #8b949e;")
+        layout.addWidget(title_lbl)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(_LICENSE_TEXT)
+        text.setStyleSheet(
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;"
+        )
+        layout.addWidget(text, stretch=1)
+
+        # ── prompt ───────────────────────────────────────────────────────────
+        prompt = QLabel(
+            "To use <b>dbcdiff</b> you must accept the terms above."
+        )
+        prompt.setStyleSheet("font-size: 12px; padding: 4px 0;")
+        layout.addWidget(prompt)
+
+        # ── buttons ──────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self._decline_btn = QPushButton("✗   Decline")
+        self._decline_btn.setFixedHeight(34)
+        self._decline_btn.setStyleSheet(
+            "QPushButton { background:#da3633; color:#fff; border-radius:6px;"
+            "  padding: 0 18px; font-weight:600; }"
+            "QPushButton:hover { background:#f85149; }"
+        )
+        self._decline_btn.clicked.connect(self._on_decline)
+        btn_row.addWidget(self._decline_btn)
+
+        btn_row.addSpacing(8)
+
+        self._accept_btn = QPushButton("✓   Accept && Continue")
+        self._accept_btn.setFixedHeight(34)
+        self._accept_btn.setObjectName("primary")
+        self._accept_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._accept_btn)
+
+        layout.addLayout(btn_row)
+
+    def _on_decline(self):
+        self.reject()
+        sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Converter tab widget
+# ---------------------------------------------------------------------------
+
+class ConverterWidget(QWidget):
+    """Tab that converts DBC ↔ Excel (.xlsx)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setSpacing(14)
+        root.setContentsMargins(20, 20, 20, 20)
+
+        # ── title ────────────────────────────────────────────────────────────
+        title = QLabel("⟳   DBC  ↔  Excel Converter")
+        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #e6edf3;")
+        root.addWidget(title)
+
+        sub = QLabel("Convert a <b>.dbc</b> file to Excel (.xlsx) or an Excel file back to <b>.dbc</b>."
+                     "  Direction is detected automatically from the source file extension.")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: #8b949e; font-size: 12px;")
+        root.addWidget(sub)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #30363d;")
+        root.addWidget(sep)
+
+        # ── source file ──────────────────────────────────────────────────────
+        src_lbl = QLabel("Source file  (.dbc or .xlsx)")
+        src_lbl.setStyleSheet("font-weight: 600; color: #e6edf3;")
+        root.addWidget(src_lbl)
+
+        src_row = QHBoxLayout()
+        self._src_edit = QLineEdit()
+        self._src_edit.setPlaceholderText("Path to source file…")
+        self._src_edit.textChanged.connect(self._on_src_changed)
+        src_row.addWidget(self._src_edit)
+
+        src_btn = QPushButton("Browse…")
+        src_btn.setFixedWidth(90)
+        src_btn.clicked.connect(self._browse_src)
+        src_row.addWidget(src_btn)
+        root.addLayout(src_row)
+
+        # ── direction indicator ──────────────────────────────────────────────
+        self._dir_lbl = QLabel("")
+        self._dir_lbl.setStyleSheet("font-size: 12px; color: #58a6ff; padding: 2px 0;")
+        root.addWidget(self._dir_lbl)
+
+        # ── output file ──────────────────────────────────────────────────────
+        out_lbl = QLabel("Output file")
+        out_lbl.setStyleSheet("font-weight: 600; color: #e6edf3;")
+        root.addWidget(out_lbl)
+
+        out_row = QHBoxLayout()
+        self._out_edit = QLineEdit()
+        self._out_edit.setPlaceholderText("Path to output file (auto-filled)…")
+        out_row.addWidget(self._out_edit)
+
+        out_btn = QPushButton("Browse…")
+        out_btn.setFixedWidth(90)
+        out_btn.clicked.connect(self._browse_out)
+        out_row.addWidget(out_btn)
+        root.addLayout(out_row)
+
+        # ── convert button ───────────────────────────────────────────────────
+        self._convert_btn = QPushButton("⚡   Convert")
+        self._convert_btn.setObjectName("primary")
+        self._convert_btn.setFixedHeight(38)
+        self._convert_btn.setEnabled(False)
+        self._convert_btn.clicked.connect(self._do_convert)
+        root.addWidget(self._convert_btn)
+
+        # ── log area ─────────────────────────────────────────────────────────
+        log_lbl = QLabel("Log")
+        log_lbl.setStyleSheet("font-weight: 600; color: #e6edf3;")
+        root.addWidget(log_lbl)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setStyleSheet(
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;"
+        )
+        self._log.setMinimumHeight(120)
+        root.addWidget(self._log, stretch=1)
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _log_msg(self, text: str):
+        self._log.append(text)
+
+    def _src_ext(self) -> str:
+        return Path(self._src_edit.text().strip()).suffix.lower()
+
+    def _on_src_changed(self, text: str):
+        text = text.strip()
+        if not text:
+            self._dir_lbl.setText("")
+            self._convert_btn.setEnabled(False)
+            return
+        ext = Path(text).suffix.lower()
+        if ext == ".dbc":
+            self._dir_lbl.setText("📄 → 📊   Direction: DBC  →  Excel (.xlsx)")
+            default_out = str(Path(text).with_suffix(".xlsx"))
+        elif ext in (".xlsx", ".xls"):
+            self._dir_lbl.setText("📊 → 📄   Direction: Excel  →  DBC (.dbc)")
+            default_out = str(Path(text).with_suffix(".dbc"))
+        else:
+            self._dir_lbl.setText("⚠  Unsupported extension — use .dbc or .xlsx")
+            self._convert_btn.setEnabled(False)
+            return
+        # auto-fill output only when it is still empty / matches old auto value
+        current_out = self._out_edit.text().strip()
+        if not current_out:
+            self._out_edit.setText(default_out)
+        self._convert_btn.setEnabled(True)
+
+    def _browse_src(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open source file", "",
+            "Supported files (*.dbc *.xlsx *.xls);;DBC files (*.dbc);;Excel files (*.xlsx *.xls);;All files (*)"
+        )
+        if path:
+            self._src_edit.setText(path)
+            self._out_edit.clear()   # reset so auto-fill re-runs
+            self._on_src_changed(path)
+
+    def _browse_out(self):
+        ext = self._src_ext()
+        if ext == ".dbc":
+            filt = "Excel files (*.xlsx);;All files (*)"
+            default_suffix = ".xlsx"
+        else:
+            filt = "DBC files (*.dbc);;All files (*)"
+            default_suffix = ".dbc"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save output file", self._out_edit.text().strip(), filt
+        )
+        if path:
+            if not Path(path).suffix:
+                path += default_suffix
+            self._out_edit.setText(path)
+
+    def _do_convert(self):
+        src = self._src_edit.text().strip()
+        out = self._out_edit.text().strip()
+        if not src or not out:
+            QMessageBox.warning(self, "Missing paths", "Please specify both source and output paths.")
+            return
+        if not Path(src).is_file():
+            QMessageBox.warning(self, "File not found", f"Source file not found:\n{src}")
+            return
+
+        self._convert_btn.setEnabled(False)
+        self._log.clear()
+        ext = self._src_ext()
+
+        try:
+            if ext == ".dbc":
+                self._log_msg(f"▶  Converting DBC → Excel…\n   Source : {src}\n   Output : {out}")
+                dbc_to_excel(src, out)
+                self._log_msg("✅  Conversion complete!")
+            elif ext in (".xlsx", ".xls"):
+                self._log_msg(f"▶  Converting Excel → DBC…\n   Source : {src}\n   Output : {out}")
+                excel_to_dbc(src, out)
+                self._log_msg("✅  Conversion complete!")
+            else:
+                self._log_msg("❌  Unsupported source extension.")
+        except Exception as exc:  # pylint: disable=broad-except
+            self._log_msg(f"❌  Error: {exc}")
+            QMessageBox.critical(self, "Conversion Error", str(exc))
+
+        self._convert_btn.setEnabled(True)
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -1034,6 +1317,10 @@ class MainWindow(QMainWindow):
             tbl = ResultsTable()
             self._view_tables.append(tbl)
             self._tabs.addTab(tbl, f"{icon}  {name}")
+
+        # ── converter tab ────────────────────────────────────────────────────
+        self._converter_tab = ConverterWidget()
+        self._tabs.addTab(self._converter_tab, "🔄  Converter")
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -1240,6 +1527,12 @@ def launch_gui():
     palette.setColor(QPalette.Highlight, QColor("#1f6feb"))
     palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
     app.setPalette(palette)
+
+    # ── License agreement ────────────────────────────────────────────────────
+    lic = LicenseDialog()
+    lic.setStyleSheet(_QSS_DARK)
+    if lic.exec() != QDialog.DialogCode.Accepted:
+        sys.exit(0)
 
     win = MainWindow()
     win.show()
