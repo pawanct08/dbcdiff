@@ -19,7 +19,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ── Full path to Windows-Store Python (avoids WSL python on this machine) ──
-$PYTHON     = "C:\Users\pcw1kor\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe"
+$PYTHON     = if (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
 $repoRoot   = Split-Path -Parent $PSScriptRoot
 $buildDir   = Join-Path $repoRoot "build"
 $distDir    = Join-Path $repoRoot "dist"

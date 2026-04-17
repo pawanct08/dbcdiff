@@ -10,3 +10,5 @@ build/
 venv/
 out/
 .eggs/
+
+nuitka-crash-report.xml
