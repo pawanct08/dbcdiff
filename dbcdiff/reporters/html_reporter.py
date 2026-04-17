@@ -75,6 +75,23 @@ td.new  { color: #3fb950; }
 
 .empty { padding: 48px; text-align: center; color: #8b949e; font-size: 1rem; }
 .table-wrap { padding: 0 32px 32px; }
+/* Bit-layout visualiser */
+.bit-section { padding: 0 32px 24px; }
+.bit-section h3 { color: #8b949e; font-size: .8rem; text-transform: uppercase;
+                  letter-spacing: .06em; margin-bottom: 8px; margin-top: 16px; }
+.bit-panels { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 8px; }
+.bit-panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+             padding: 12px; }
+.bit-panel h4 { font-size: .75rem; color: #8b949e; margin-bottom: 6px; }
+.bit-grid { display: grid; grid-template-columns: repeat(8, 28px);
+            gap: 2px; font-size: .65rem; }
+.bit-cell { width: 28px; height: 28px; border-radius: 3px; display: flex;
+            align-items: center; justify-content: center;
+            border: 1px solid #30363d; color: #0d1117; font-weight: 600; }
+.bit-cell.unused { background: #21262d; color: #8b949e; border-color: #21262d; }
+.bit-legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.bit-legend-item { display: flex; align-items: center; gap: 4px; font-size: .7rem; }
+.bit-legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
 """
 
 _JS = """
@@ -125,7 +142,8 @@ document.querySelector('[data-sev="all"]').classList.add('active');
 
 
 def write_html(entries: list[DiffEntry], fp: TextIO,
-               file_a: str = "", file_b: str = "") -> None:
+               file_a: str = "", file_b: str = "",
+               db_a=None, db_b=None) -> None:
     sev_counts = {
         "breaking":   sum(1 for e in entries if e.severity == Severity.BREAKING),
         "functional": sum(1 for e in entries if e.severity == Severity.FUNCTIONAL),
@@ -142,6 +160,7 @@ def write_html(entries: list[DiffEntry], fp: TextIO,
     ])
 
     rows_html = _build_rows(entries)
+    bit_section = _build_bit_sections(entries, db_a, db_b) if (db_a and db_b) else ""
 
     fp.write(f"""<!DOCTYPE html>
 <html lang="en">
@@ -181,6 +200,7 @@ def write_html(entries: list[DiffEntry], fp: TextIO,
   <button class="filter-btn" data-sev="functional">🟠 Functional ({sev_counts['functional']})</button>
   <button class="filter-btn" data-sev="metadata">🟡 Metadata ({sev_counts['metadata']})</button>
 </div>
+{bit_section}
 
 <div class="table-wrap">
 {"" if entries else '<div class="empty">✅ No differences found — files are identical.</div>'}
@@ -240,3 +260,85 @@ def _fmt_val(v) -> str:
     if v is None:
         return '<span style="color:#8b949e">—</span>'
     return html.escape(str(v))
+
+
+# ---------------------------------------------------------------------------
+# Bit-layout visualiser helpers  (Feature #3)
+# ---------------------------------------------------------------------------
+
+_BIT_COLORS = [
+    "#58a6ff", "#3fb950", "#d29922", "#f85149", "#8957e5",
+    "#39d353", "#ff7b72", "#ffa657", "#79c0ff", "#56d364",
+]
+
+
+def _build_signal_bit_map(msg) -> dict[int, str]:
+    """Return {bit_position: signal_name} for every bit in msg."""
+    bit_map: dict[int, str] = {}
+    for sig in msg.signals:
+        for i in range(sig.length):
+            bit_map[sig.start + i] = sig.name
+    return bit_map
+
+
+def _render_bit_panel(title: str, msg, color_map: dict[str, str]) -> str:
+    """Render one side (old or new) of the bit-layout grid as HTML."""
+    total_bits = msg.length * 8
+    bit_map = _build_signal_bit_map(msg)
+    cells = []
+    for bit in range(total_bits):
+        sig_name = bit_map.get(bit)
+        if sig_name:
+            bg = color_map.get(sig_name, "#58a6ff")
+            cells.append(
+                f'<div class="bit-cell" style="background:{bg}" '
+                f'title="{html.escape(sig_name)} bit {bit}">{bit % 8}</div>'
+            )
+        else:
+            cells.append(f'<div class="bit-cell unused">{bit % 8}</div>')
+    grid = "\n    ".join(cells)
+    legend_items = ""
+    for sig_name, color in color_map.items():
+        legend_items += (
+            f'<div class="bit-legend-item">'
+            f'<div class="bit-legend-swatch" style="background:{color}"></div>'
+            f'{html.escape(sig_name)}</div>'
+        )
+    return (
+        f'<div class="bit-panel"><h4>{html.escape(title)}</h4>'
+        f'<div class="bit-grid">\n    {grid}\n</div>'
+        f'<div class="bit-legend">{legend_items}</div></div>'
+    )
+
+
+def _build_bit_sections(entries: list[DiffEntry], db_a, db_b) -> str:
+    """Build HTML for changed messages' bit-layout side-by-side panels."""
+    changed_msg_names = {
+        e.entity
+        for e in entries
+        if e.kind == CHANGED and e.path.split(".")[0] == e.entity
+    }
+    if not changed_msg_names:
+        return ""
+    sections = []
+    msg_map_a = {m.name: m for m in db_a.messages}
+    msg_map_b = {m.name: m for m in db_b.messages}
+    for name in sorted(changed_msg_names):
+        ma = msg_map_a.get(name)
+        mb = msg_map_b.get(name)
+        if not ma or not mb:
+            continue
+        all_sigs = sorted({s.name for s in ma.signals} | {s.name for s in mb.signals})
+        color_map = {
+            sig: _BIT_COLORS[i % len(_BIT_COLORS)]
+            for i, sig in enumerate(all_sigs)
+        }
+        panel_a = _render_bit_panel("File A", ma, color_map)
+        panel_b = _render_bit_panel("File B", mb, color_map)
+        sections.append(
+            f'<div class="bit-section">'
+            f'<h3>Bit Layout: {html.escape(name)}</h3>'
+            f'<div class="bit-panels">{panel_a}{panel_b}</div>'
+            f'</div>'
+        )
+    return "\n".join(sections)

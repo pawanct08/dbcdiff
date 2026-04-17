@@ -214,7 +214,8 @@ def _diff_j1939_fields(ma, mb, msg_name: str, protocol: str,
 
 def compare_databases(db_a, db_b,
                       path_a: str = "File A",
-                      path_b: str = "File B") -> list[DiffEntry]:
+                      path_b: str = "File B",
+                      baud_rate: int = 500_000) -> list[DiffEntry]:
     """
     Compare two cantools Database objects.
 
@@ -249,10 +250,11 @@ def compare_databases(db_a, db_b,
     proto_label = proto_a.value
 
     entries.extend(_diff_nodes(db_a, db_b, proto_label))
-    entries.extend(_diff_messages(db_a, db_b, proto_label))
+    entries.extend(_diff_messages(db_a, db_b, proto_label, baud_rate=baud_rate))
     entries.extend(_diff_db_attributes(db_a, db_b))
     entries.extend(_diff_envvars(db_a, db_b))
 
+    entries = _expand_choices_diff(entries)
     entries.sort(key=lambda e: -e.severity)
     return entries
 
@@ -299,7 +301,7 @@ def _diff_nodes(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
 # Messages & Signals
 # ---------------------------------------------------------------------------
 
-def _diff_messages(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
+def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> list[DiffEntry]:
     entries: list[DiffEntry] = []
     msgs_a = {_msg_key(m): m for m in db_a.messages}
     msgs_b = {_msg_key(m): m for m in db_b.messages}
@@ -320,7 +322,7 @@ def _diff_messages(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
         ma, mb = msgs_a[key], msgs_b[key]
         prefix = f"message.{ma.name}(0x{ma.frame_id:X})"
 
-        entries.extend(_compare_fields(
+        msg_fields = _compare_fields(
             "message", prefix, ma, mb,
             [
                 (_MSG_BREAKING,    Severity.BREAKING),
@@ -328,7 +330,25 @@ def _diff_messages(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
                 (_MSG_METADATA,    Severity.METADATA),
             ],
             protocol=protocol,
-        ))
+        )
+        for _ent in msg_fields:
+            if (_ent.kind == CHANGED
+                    and _ent.path == f"{prefix}.cycle_time"
+                    and _ent.value_a and _ent.value_b):
+                try:
+                    ct_a, ct_b = float(_ent.value_a), float(_ent.value_b)
+                    if ct_a > 0 and ct_b > 0:
+                        overhead = 67 if ma.is_extended_frame else 47
+                        frame_bits = overhead + ma.length * 8
+                        load_a = frame_bits / (ct_a * 1e-3) / baud_rate * 100
+                        load_b = frame_bits / (ct_b * 1e-3) / baud_rate * 100
+                        _ent.detail = (
+                            f"bus_load {load_a:.3f}% → {load_b:.3f}%"
+                            f"  (Δ{load_b - load_a:+.3f}%  @ {baud_rate // 1000}kbps)"
+                        )
+                except (TypeError, ZeroDivisionError, ValueError):
+                    pass
+        entries.extend(msg_fields)
 
         # J1939 extended decode
         _diff_j1939_fields(ma, mb, ma.name, protocol, entries)
@@ -473,3 +493,84 @@ def max_severity(entries: list[DiffEntry]) -> Optional[Severity]:
     if not entries:
         return None
     return Severity(max(e.severity for e in entries))
+
+
+# ---------------------------------------------------------------------------
+# Value-table semantic diff  (Feature #4)
+# ---------------------------------------------------------------------------
+
+def _expand_choices_diff(entries: list[DiffEntry]) -> list[DiffEntry]:
+    """Expand raw CHANGED .choices entries into per-key ADDED/REMOVED/CHANGED rows."""
+    result: list[DiffEntry] = []
+    for e in entries:
+        if (e.kind == CHANGED
+                and e.path.endswith(".choices")
+                and isinstance(e.value_a, dict)
+                and isinstance(e.value_b, dict)):
+            all_keys = sorted(
+                e.value_a.keys() | e.value_b.keys(),
+                key=lambda x: int(x) if str(x).lstrip("-").isdigit() else x,
+            )
+            for k in all_keys:
+                va = e.value_a.get(k)
+                vb = e.value_b.get(k)
+                if va is None:
+                    result.append(DiffEntry(e.entity, ADDED, e.severity,
+                                            f"{e.path}[{k}]",
+                                            value_b=vb, protocol=e.protocol))
+                elif vb is None:
+                    result.append(DiffEntry(e.entity, REMOVED, e.severity,
+                                            f"{e.path}[{k}]",
+                                            value_a=va, protocol=e.protocol))
+                elif va != vb:
+                    result.append(DiffEntry(e.entity, CHANGED, e.severity,
+                                            f"{e.path}[{k}]",
+                                            value_a=va, value_b=vb,
+                                            protocol=e.protocol))
+                # identical keys are silently dropped (no diff)
+        else:
+            result.append(e)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Three-way merge diff  (Feature #1)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ThreeWayResult:
+    """Three-way CAN database diff (base vs branch_a vs branch_b)."""
+    only_in_a: list[DiffEntry]
+    only_in_b: list[DiffEntry]
+    conflict:  list[DiffEntry]
+    common:    list[DiffEntry]
+
+
+def compare_three_way(db_base, db_a, db_b,
+                      path_base: str = "Base",
+                      path_a:    str = "Branch A",
+                      path_b:    str = "Branch B",
+                      baud_rate: int = 500_000) -> ThreeWayResult:
+    """Three-way diff: changes in each branch relative to a shared base."""
+    entries_a = compare_databases(db_base, db_a, path_base, path_a,
+                                  baud_rate=baud_rate)
+    entries_b = compare_databases(db_base, db_b, path_base, path_b,
+                                  baud_rate=baud_rate)
+
+    idx_a = {(e.path, e.kind): e for e in entries_a}
+    idx_b = {(e.path, e.kind): e for e in entries_b}
+    keys_a, keys_b = set(idx_a), set(idx_b)
+
+    only_a   = sorted([idx_a[k] for k in keys_a - keys_b], key=lambda e: e.path)
+    only_b   = sorted([idx_b[k] for k in keys_b - keys_a], key=lambda e: e.path)
+    common:   list[DiffEntry] = []
+    conflict: list[DiffEntry] = []
+
+    for k in sorted(keys_a & keys_b):
+        ea, eb = idx_a[k], idx_b[k]
+        if ea.value_b == eb.value_b:
+            common.append(ea)
+        else:
+            conflict.extend([ea, eb])
+
+    return ThreeWayResult(only_a, only_b, conflict, common)

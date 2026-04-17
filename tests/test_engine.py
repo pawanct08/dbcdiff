@@ -312,3 +312,308 @@ class TestIdentical:
         # Filter out any summary/info entries if the engine adds them
         diff_entries = [e for e in entries if e.kind in (ADDED, REMOVED, CHANGED)]
         assert diff_entries == [], f"Expected no diff entries, got: {diff_entries}"
+
+
+# ---------------------------------------------------------------------------
+# Feature #4 — Value table / choices semantic diff
+# ---------------------------------------------------------------------------
+
+# Base: signal with choices {0: "Idle", 1: "Run", 2: "Error"}
+MSG_WITH_CHOICES_A = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 300 StatusMsg: 2 Vector__XXX
+ SG_ Mode : 0|4@1+ (1,0) [0|15] "" Vector__XXX
+
+VAL_ 300 Mode 0 "Idle" 1 "Run" 2 "Error" ;
+"""
+
+# Changed: key 1 renamed Run→Running, key 3 added, key 2 removed
+MSG_WITH_CHOICES_B = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 300 StatusMsg: 2 Vector__XXX
+ SG_ Mode : 0|4@1+ (1,0) [0|15] "" Vector__XXX
+
+VAL_ 300 Mode 0 "Idle" 1 "Running" 3 "Fault" ;
+"""
+
+
+class TestChoicesSemanticDiff:
+
+    def test_unchanged_key_produces_no_entry(self):
+        """Key 0 'Idle' unchanged in both files → must not appear in result."""
+        db_a = _load(MSG_WITH_CHOICES_A)
+        db_b = _load(MSG_WITH_CHOICES_B)
+        from dbcdiff.engine import _expand_choices_diff
+        entries = compare_databases(db_a, db_b)
+        choices_entries = [e for e in entries if "choices" in e.path.lower()]
+        # Key 0 "Idle" unchanged — must not appear as its own row
+        key0_entries = [e for e in choices_entries if "[0]" in e.path]
+        assert key0_entries == [], f"Unchanged key 0 should not appear, got: {key0_entries}"
+
+    def test_renamed_choice_is_changed(self):
+        """Key 1 changes from 'Run' to 'Running' → CHANGED row with [1] in path."""
+        db_a = _load(MSG_WITH_CHOICES_A)
+        db_b = _load(MSG_WITH_CHOICES_B)
+        entries = compare_databases(db_a, db_b)
+        changed = _find(entries, kind=CHANGED, path_fragment="[1]")
+        assert changed, "Expected a CHANGED entry for choices key 1 (Run→Running)"
+
+    def test_new_choice_key_is_added(self):
+        """Key 3 'Fault' exists only in B → ADDED row with [3] in path."""
+        db_a = _load(MSG_WITH_CHOICES_A)
+        db_b = _load(MSG_WITH_CHOICES_B)
+        entries = compare_databases(db_a, db_b)
+        added = _find(entries, kind=ADDED, path_fragment="[3]")
+        assert added, "Expected an ADDED entry for choices key 3 (Fault)"
+
+    def test_removed_choice_key_is_removed(self):
+        """Key 2 'Error' exists only in A → REMOVED row with [2] in path."""
+        db_a = _load(MSG_WITH_CHOICES_A)
+        db_b = _load(MSG_WITH_CHOICES_B)
+        entries = compare_databases(db_a, db_b)
+        removed = _find(entries, kind=REMOVED, path_fragment="[2]")
+        assert removed, "Expected a REMOVED entry for choices key 2 (Error)"
+
+    def test_expand_choices_diff_direct(self):
+        """Unit-test _expand_choices_diff() directly with a synthetic DiffEntry."""
+        from dbcdiff.engine import _expand_choices_diff, DiffEntry
+        e = DiffEntry(
+            entity="Mode",
+            kind=CHANGED,
+            severity=Severity.METADATA,
+            path="StatusMsg.Mode.choices",
+            value_a={1: "Idle", 2: "Run"},
+            value_b={1: "Idle", 2: "Running", 3: "Error"},
+        )
+        result = _expand_choices_diff([e])
+        paths = [r.path for r in result]
+        # Key 1 unchanged → no row
+        assert not any("[1]" in p for p in paths), "Key 1 unchanged, should not appear"
+        # Key 2 changed
+        assert any(r.kind == CHANGED and "[2]" in r.path for r in result), (
+            "Key 2 renamed: expected CHANGED row"
+        )
+        # Key 3 added
+        assert any(r.kind == ADDED and "[3]" in r.path for r in result), (
+            "Key 3 new: expected ADDED row"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature #5 — Cycle time / bus-load annotation
+# ---------------------------------------------------------------------------
+
+MSG_CYCLE_100 = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 400 BusLoad: 8 Vector__XXX
+ SG_ Speed : 0|16@1+ (1,0) [0|300] "km/h" Vector__XXX
+
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_ "GenMsgCycleTime" BO_ 400 100;
+"""
+
+MSG_CYCLE_200 = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 400 BusLoad: 8 Vector__XXX
+ SG_ Speed : 0|16@1+ (1,0) [0|300] "km/h" Vector__XXX
+
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_ "GenMsgCycleTime" BO_ 400 200;
+"""
+
+
+class TestBusLoadAnnotation:
+
+    def test_cycle_time_change_detected(self):
+        """Changing GenMsgCycleTime from 100 to 200 must produce a CHANGED entry."""
+        db_a = _load(MSG_CYCLE_100)
+        db_b = _load(MSG_CYCLE_200)
+        entries = compare_databases(db_a, db_b)
+        cycle_entries = _find(entries, kind=CHANGED, path_fragment="cycle_time")
+        assert cycle_entries, "Expected a CHANGED entry for cycle_time"
+
+    def test_baud_rate_kwarg_accepted(self):
+        """compare_databases() must not raise when baud_rate kwarg is supplied."""
+        db_a = _load(MINIMAL_MSG)
+        db_b = _load(MSG_SCALE_CHANGED)
+        entries = compare_databases(db_a, db_b, baud_rate=250_000)
+        assert isinstance(entries, list)
+
+    def test_baud_rate_does_not_affect_non_cycle_entries(self):
+        """Changing baud_rate must not change the number of diff entries."""
+        db_a = _load(MINIMAL_MSG)
+        db_b = _load(MSG_RPM_REMOVED)
+        entries_500 = compare_databases(db_a, db_b, baud_rate=500_000)
+        entries_250 = compare_databases(db_a, db_b, baud_rate=250_000)
+        assert len(entries_500) == len(entries_250), (
+            "baud_rate should not change entry count when cycle_time is unchanged"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature #1 — Three-way merge diff
+# ---------------------------------------------------------------------------
+
+# Base: RPM scale = 1.0
+THREE_WAY_BASE = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 500 VehicleData: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (1,0) [0|8000] "rpm" Vector__XXX
+ SG_ Speed : 16|16@1+ (0.1,0) [0|300] "km/h" Vector__XXX
+
+"""
+
+# Branch A only: RPM scale changed to 0.5
+THREE_WAY_BRANCH_A_ONLY = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 500 VehicleData: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (0.5,0) [0|8000] "rpm" Vector__XXX
+ SG_ Speed : 16|16@1+ (0.1,0) [0|300] "km/h" Vector__XXX
+
+"""
+
+# Branch B only: Speed scale changed to 0.5
+THREE_WAY_BRANCH_B_ONLY = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 500 VehicleData: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (1,0) [0|8000] "rpm" Vector__XXX
+ SG_ Speed : 16|16@1+ (0.5,0) [0|300] "km/h" Vector__XXX
+
+"""
+
+# Both branches: RPM scale changed but to *different* values → conflict
+THREE_WAY_BRANCH_A_CONFLICT = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 500 VehicleData: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (0.5,0) [0|8000] "rpm" Vector__XXX
+ SG_ Speed : 16|16@1+ (0.1,0) [0|300] "km/h" Vector__XXX
+
+"""
+
+THREE_WAY_BRANCH_B_CONFLICT = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 500 VehicleData: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (2,0) [0|8000] "rpm" Vector__XXX
+ SG_ Speed : 16|16@1+ (0.1,0) [0|300] "km/h" Vector__XXX
+
+"""
+
+
+class TestThreeWayDiff:
+
+    def test_only_in_a_when_b_unchanged(self):
+        """Change only in branch A: result.only_in_a must be non-empty."""
+        from dbcdiff.engine import compare_three_way
+        db_base = _load(THREE_WAY_BASE)
+        db_a    = _load(THREE_WAY_BRANCH_A_ONLY)   # RPM scale 1→0.5
+        db_b    = _load(THREE_WAY_BASE)              # unchanged
+        result = compare_three_way(db_base, db_a, db_b)
+        assert result.only_in_a, "Expected changes only in branch A"
+        assert result.only_in_b == [], "Expected no changes in branch B"
+        assert result.conflict  == [], "Expected no conflicts"
+
+    def test_only_in_b_when_a_unchanged(self):
+        """Change only in branch B: result.only_in_b must be non-empty."""
+        from dbcdiff.engine import compare_three_way
+        db_base = _load(THREE_WAY_BASE)
+        db_a    = _load(THREE_WAY_BASE)              # unchanged
+        db_b    = _load(THREE_WAY_BRANCH_B_ONLY)    # Speed scale 0.1→0.5
+        result = compare_three_way(db_base, db_a, db_b)
+        assert result.only_in_b, "Expected changes only in branch B"
+        assert result.only_in_a == [], "Expected no changes in branch A"
+        assert result.conflict  == [], "Expected no conflicts"
+
+    def test_conflict_when_both_change_same_field_differently(self):
+        """Both branches change RPM scale to different values → conflict."""
+        from dbcdiff.engine import compare_three_way
+        db_base = _load(THREE_WAY_BASE)
+        db_a    = _load(THREE_WAY_BRANCH_A_CONFLICT)   # RPM scale → 0.5
+        db_b    = _load(THREE_WAY_BRANCH_B_CONFLICT)   # RPM scale → 2
+        result = compare_three_way(db_base, db_a, db_b)
+        assert result.conflict, "Expected conflict when same field changed differently in each branch"
+
+    def test_no_conflict_when_both_make_same_change(self):
+        """Both branches make *identical* changes to the same field → no conflict."""
+        from dbcdiff.engine import compare_three_way
+        db_base = _load(THREE_WAY_BASE)
+        db_a    = _load(THREE_WAY_BRANCH_A_CONFLICT)   # RPM scale → 0.5
+        db_b    = _load(THREE_WAY_BRANCH_A_CONFLICT)   # RPM scale → 0.5 (same)
+        result = compare_three_way(db_base, db_a, db_b)
+        assert result.conflict == [], (
+            "No conflict expected when both branches make the same change"
+        )
+
+    def test_three_way_identical_bases_empty(self):
+        """All three DBCs identical → all result lists empty."""
+        from dbcdiff.engine import compare_three_way
+        db = _load(THREE_WAY_BASE)
+        result = compare_three_way(db, db, db)
+        assert result.only_in_a == []
+        assert result.only_in_b == []
+        assert result.conflict  == []
+        assert result.common    == []
