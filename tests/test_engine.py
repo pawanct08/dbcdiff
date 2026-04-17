@@ -14,6 +14,7 @@ from dbcdiff.engine import (
     ADDED,
     REMOVED,
     CHANGED,
+    RENAME,
 )
 
 
@@ -617,3 +618,145 @@ class TestThreeWayDiff:
         assert result.only_in_b == []
         assert result.conflict  == []
         assert result.common    == []
+
+
+# ---------------------------------------------------------------------------
+# Feature #6 — Semantic rename detection
+# ---------------------------------------------------------------------------
+
+# RPM renamed to EngineSpeed (identical geometry: bit 0|16, scale=1, offset=0)
+MSG_RPM_RENAMED = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 100 EngineData: 8 Vector__XXX
+ SG_ EngineSpeed : 0|16@1+ (1,0) [0|8000] "rpm" Vector__XXX
+ SG_ Temp : 16|8@1+ (0.5,-40) [0|150] "degC" Vector__XXX
+
+"""
+
+# RPM scale changed AND renamed → different fingerprint → should NOT produce RENAME
+MSG_RPM_RENAMED_DIFF_SCALE = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 100 EngineData: 8 Vector__XXX
+ SG_ EngineSpeed : 0|16@1+ (0.5,0) [0|8000] "rpm" Vector__XXX
+ SG_ Temp : 16|8@1+ (0.5,-40) [0|150] "degC" Vector__XXX
+
+"""
+
+
+class TestRenameDetection:
+
+    def test_signal_rename_detected(self):
+        """Same geometry, new name → single RENAME, no plain REMOVED/ADDED for that signal."""
+        db_a = _load(MINIMAL_MSG)
+        db_b = _load(MSG_RPM_RENAMED)
+        entries = compare_databases(db_a, db_b)
+        renames = _find(entries, kind=RENAME, entity="signal")
+        assert len(renames) == 1, f"Expected 1 RENAME, got {renames}"
+        assert renames[0].value_a == "RPM"
+        assert renames[0].value_b == "EngineSpeed"
+        assert renames[0].severity == Severity.METADATA
+        assert not _find(entries, kind=REMOVED, path_fragment="RPM"), \
+            "Plain REMOVED must not co-exist with RENAME for same signal"
+        assert not _find(entries, kind=ADDED, path_fragment="EngineSpeed"), \
+            "Plain ADDED must not co-exist with RENAME for same signal"
+
+    def test_different_geometry_not_renamed(self):
+        """Different scale → plain REMOVED + ADDED, no RENAME."""
+        db_a = _load(MINIMAL_MSG)
+        db_b = _load(MSG_RPM_RENAMED_DIFF_SCALE)
+        entries = compare_databases(db_a, db_b)
+        assert not _find(entries, kind=RENAME), \
+            "Scale change should not produce RENAME"
+        assert _find(entries, kind=REMOVED, path_fragment="RPM"), \
+            "Old RPM must appear as REMOVED"
+        assert _find(entries, kind=ADDED, path_fragment="EngineSpeed"), \
+            "New EngineSpeed must appear as ADDED"
+
+    def test_partial_rename_and_plain_remove(self):
+        """RPM renamed + Temp fully removed → 1 RENAME + 1 REMOVED."""
+        MSG_RPM_RENAMED_TEMP_GONE = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 100 EngineData: 8 Vector__XXX
+ SG_ EngineSpeed : 0|16@1+ (1,0) [0|8000] "rpm" Vector__XXX
+
+"""
+        db_a = _load(MINIMAL_MSG)
+        db_b = _load(MSG_RPM_RENAMED_TEMP_GONE)
+        entries = compare_databases(db_a, db_b)
+        renames = _find(entries, kind=RENAME)
+        assert len(renames) == 1
+        assert renames[0].value_a == "RPM"
+        assert renames[0].value_b == "EngineSpeed"
+        removed_sigs = _find(entries, kind=REMOVED, entity="signal")
+        assert len(removed_sigs) == 1
+        assert "Temp" in removed_sigs[0].path
+
+
+# ---------------------------------------------------------------------------
+# Feature #7 — Regression baseline tracking
+# ---------------------------------------------------------------------------
+
+class TestBaseline:
+
+    def test_set_creates_pkl_file(self, tmp_path):
+        """set_baseline() must write a non-empty .pkl file."""
+        from dbcdiff.baseline import set_baseline
+        dbc = tmp_path / "test.dbc"
+        dbc.write_text(textwrap.dedent(MINIMAL_MSG))
+        stored = set_baseline(str(dbc), baseline_dir=tmp_path / "bl")
+        assert stored.exists(), "Baseline file should be created"
+        assert stored.suffix == ".pkl"
+        assert stored.stat().st_size > 0
+
+    def test_check_identical_returns_no_changes(self, tmp_path):
+        """Checking an unchanged file returns no ADDED/REMOVED/CHANGED/RENAME entries."""
+        from dbcdiff.baseline import set_baseline, check_baseline
+        dbc = tmp_path / "test.dbc"
+        dbc.write_text(textwrap.dedent(MINIMAL_MSG))
+        bl_dir = tmp_path / "bl"
+        set_baseline(str(dbc), baseline_dir=bl_dir)
+        entries = check_baseline(str(dbc), baseline_dir=bl_dir)
+        diff_kinds = {ADDED, REMOVED, CHANGED, RENAME}
+        change_entries = [e for e in entries if e.kind in diff_kinds]
+        assert change_entries == [], f"Unexpected changes against identical baseline: {change_entries}"
+
+    def test_check_detects_scale_change(self, tmp_path):
+        """After changing RPM scale, check_baseline surfaces a CHANGED entry."""
+        from dbcdiff.baseline import set_baseline, check_baseline
+        dbc = tmp_path / "test.dbc"
+        dbc.write_text(textwrap.dedent(MINIMAL_MSG))
+        bl_dir = tmp_path / "bl"
+        set_baseline(str(dbc), baseline_dir=bl_dir)
+        dbc.write_text(textwrap.dedent(MSG_SCALE_CHANGED))
+        entries = check_baseline(str(dbc), baseline_dir=bl_dir)
+        changed = _find(entries, kind=CHANGED, path_fragment="RPM")
+        assert changed, "Expected a CHANGED entry for RPM scale after baseline check"
+
+    def test_check_missing_baseline_raises(self, tmp_path):
+        """check_baseline raises FileNotFoundError when no snapshot exists."""
+        from dbcdiff.baseline import check_baseline
+        dbc = tmp_path / "test.dbc"
+        dbc.write_text(textwrap.dedent(MINIMAL_MSG))
+        with pytest.raises(FileNotFoundError, match="baseline"):
+            check_baseline(str(dbc), baseline_dir=tmp_path / "no_such_dir")

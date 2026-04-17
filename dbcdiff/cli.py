@@ -17,7 +17,7 @@ import os
 import cantools
 
 from . import __version__
-from .engine import compare_databases, diff_databases, Severity, max_severity, ADDED, REMOVED, CHANGED
+from .engine import compare_databases, diff_databases, Severity, max_severity, ADDED, REMOVED, CHANGED, RENAME
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,7 @@ _KIND_LABEL = {
     ADDED:   "➕ ADDED",
     REMOVED: "➖ REMOVED",
     CHANGED: "✏️  CHANGED",
+    RENAME:  "🔄 RENAMED",
 }
 
 
@@ -238,10 +239,96 @@ def _print_three_way(result, use_colour: bool, severity_filter: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Baseline subcommand  (feature: regression baseline tracking)
+# ---------------------------------------------------------------------------
+
+def _main_baseline(argv: list[str]) -> int:
+    """Dispatch ``dbcdiff baseline set|check FILE``."""
+    import argparse as _ap
+
+    p = _ap.ArgumentParser(
+        prog="dbcdiff baseline",
+        description="Manage regression baselines for DBC files.",
+    )
+    sub = p.add_subparsers(dest="action", required=True)
+
+    set_p = sub.add_parser("set", help="Store current DBC as baseline snapshot")
+    set_p.add_argument("dbc_file", help="Path to the DBC file")
+
+    chk_p = sub.add_parser("check", help="Compare DBC against stored baseline")
+    chk_p.add_argument("dbc_file", help="Path to the DBC file")
+    chk_p.add_argument(
+        "--severity",
+        choices=["breaking", "functional", "metadata", "all"],
+        default="all",
+        help="Report only changes at or above this severity (default: all)",
+    )
+    chk_p.add_argument("--json", action="store_true",
+                       help="Print JSON report to stdout")
+    chk_p.add_argument("--no-color", action="store_true",
+                       help="Disable ANSI colour output")
+
+    args = p.parse_args(argv)
+    use_colour = not getattr(args, "no_color", False) and sys.stdout.isatty()
+    if use_colour and sys.platform == "win32":
+        os.system("color")
+
+    from .baseline import set_baseline, check_baseline
+
+    if args.action == "set":
+        try:
+            stored_path = set_baseline(args.dbc_file)
+            print(f"✅  Baseline saved → {stored_path}")
+            return 0
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 4
+
+    # action == "check"
+    try:
+        entries = check_baseline(args.dbc_file)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 4
+    except Exception as exc:
+        print(f"Error loading file: {exc}", file=sys.stderr)
+        return 4
+
+    sev_filter = getattr(args, "severity", "all")
+    print(
+        _bold("dbcdiff baseline check", use_colour)
+        + f"  {_colour(args.dbc_file, 'cyan', use_colour)}"
+    )
+    _print_entries(entries, use_colour, sev_filter)
+    _print_summary(entries, use_colour)
+
+    if getattr(args, "json", False):
+        import io
+        from .reporters.json_reporter import write_json
+        buf = io.StringIO()
+        write_json(entries, buf, pretty=True)
+        print(buf.getvalue())
+
+    worst = max_severity(entries)
+    if worst == Severity.BREAKING:
+        return 3
+    if worst == Severity.FUNCTIONAL:
+        return 2
+    if worst == Severity.METADATA:
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
+    # Fast-path: baseline subcommand is handled by its own parser
+    _argv = argv if argv is not None else sys.argv[1:]
+    if _argv and _argv[0] == "baseline":
+        return _main_baseline(_argv[1:])
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 

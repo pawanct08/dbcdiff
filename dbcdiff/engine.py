@@ -33,6 +33,7 @@ class Severity(IntEnum):
 ADDED   = "added"
 REMOVED = "removed"
 CHANGED = "changed"
+RENAME  = "renamed"
 
 
 # ---------------------------------------------------------------------------
@@ -373,12 +374,68 @@ def _signals_overlap(sig, other_signals) -> bool:
     return any(sig_bits & _bit_set(o) for o in other_signals)
 
 
+def _sig_fingerprint(s) -> tuple:
+    """Return a geometry-and-scaling fingerprint used for rename detection.
+
+    Two signals with identical fingerprints but different names are treated as
+    a *rename* rather than a removal + addition.
+    """
+    return (
+        s.start,
+        s.length,
+        str(s.byte_order),
+        s.is_signed,
+        s.scale,
+        s.offset,
+    )
+
+
 def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry]:
     entries: list[DiffEntry] = []
     sigs_a = {_sig_key(s): s for s in ma.signals}
     sigs_b = {_sig_key(s): s for s in mb.signals}
 
-    for name in sorted(sigs_a.keys() - sigs_b.keys()):
+    removed_names = sorted(sigs_a.keys() - sigs_b.keys())
+    added_names   = sorted(sigs_b.keys() - sigs_a.keys())
+
+    # ------------------------------------------------------------------
+    # Rename detection: match removed↔added signals by geometry fingerprint.
+    # If a removed signal shares (start, length, byte_order, is_signed,
+    # scale, offset) with an added signal, it's a rename — emit a single
+    # RENAME entry instead of REMOVED + ADDED.
+    # ------------------------------------------------------------------
+    fp_to_removed: dict[tuple, str] = {}
+    for name in removed_names:
+        fp = _sig_fingerprint(sigs_a[name])
+        # First match wins; if two removed signals share a fingerprint we
+        # cannot determine which was renamed, so keep only the first.
+        if fp not in fp_to_removed:
+            fp_to_removed[fp] = name
+
+    renamed_removed: set[str] = set()
+    renamed_added:   set[str] = set()
+
+    for add_name in added_names:
+        fp = _sig_fingerprint(sigs_b[add_name])
+        if fp in fp_to_removed:
+            old_name = fp_to_removed.pop(fp)   # consume so it's not reused
+            renamed_removed.add(old_name)
+            renamed_added.add(add_name)
+            entries.append(DiffEntry(
+                entity="signal",
+                kind=RENAME,
+                severity=Severity.METADATA,
+                path=f"{msg_prefix}.{old_name}",
+                value_a=old_name,
+                value_b=add_name,
+                detail=f"renamed {old_name!r} → {add_name!r}",
+                protocol=protocol,
+            ))
+
+    # Emit plain REMOVED for signals that weren't matched to a rename
+    for name in removed_names:
+        if name in renamed_removed:
+            continue
         sev = (
             Severity.BREAKING
             if _signals_overlap(sigs_a[name], sigs_b.values())
@@ -388,7 +445,10 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
                                   f"{msg_prefix}.{name}", value_a=name,
                                   protocol=protocol))
 
-    for name in sorted(sigs_b.keys() - sigs_a.keys()):
+    # Emit plain ADDED for signals that weren't matched to a rename
+    for name in added_names:
+        if name in renamed_added:
+            continue
         sev = (
             Severity.BREAKING
             if _signals_overlap(sigs_b[name], sigs_a.values())
