@@ -1,4 +1,4 @@
-﻿"""
+"""
 dbcdiff.engine
 --------------
 Core diff engine.  Compares two cantools Database objects and returns a flat
@@ -306,13 +306,13 @@ def _diff_messages(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
 
     for key in sorted(msgs_a.keys() - msgs_b.keys()):
         m = msgs_a[key]
-        entries.append(DiffEntry("message", REMOVED, Severity.FUNCTIONAL,
+        entries.append(DiffEntry("message", REMOVED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
                                   value_a=m.name, protocol=protocol))
 
     for key in sorted(msgs_b.keys() - msgs_a.keys()):
         m = msgs_b[key]
-        entries.append(DiffEntry("message", ADDED, Severity.FUNCTIONAL,
+        entries.append(DiffEntry("message", ADDED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
                                   value_b=m.name, protocol=protocol))
 
@@ -345,18 +345,36 @@ def _diff_messages(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
     return entries
 
 
+def _signals_overlap(sig, other_signals) -> bool:
+    """Return True if *sig* bit range overlaps any signal in *other_signals*."""
+    def _bit_set(s) -> set:
+        return set(range(s.start, s.start + s.length))
+    sig_bits = _bit_set(sig)
+    return any(sig_bits & _bit_set(o) for o in other_signals)
+
+
 def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry]:
     entries: list[DiffEntry] = []
     sigs_a = {_sig_key(s): s for s in ma.signals}
     sigs_b = {_sig_key(s): s for s in mb.signals}
 
     for name in sorted(sigs_a.keys() - sigs_b.keys()):
-        entries.append(DiffEntry("signal", REMOVED, Severity.FUNCTIONAL,
+        sev = (
+            Severity.BREAKING
+            if _signals_overlap(sigs_a[name], sigs_b.values())
+            else Severity.FUNCTIONAL
+        )
+        entries.append(DiffEntry("signal", REMOVED, sev,
                                   f"{msg_prefix}.{name}", value_a=name,
                                   protocol=protocol))
 
     for name in sorted(sigs_b.keys() - sigs_a.keys()):
-        entries.append(DiffEntry("signal", ADDED, Severity.FUNCTIONAL,
+        sev = (
+            Severity.BREAKING
+            if _signals_overlap(sigs_b[name], sigs_a.values())
+            else Severity.FUNCTIONAL
+        )
+        entries.append(DiffEntry("signal", ADDED, sev,
                                   f"{msg_prefix}.{name}", value_b=name,
                                   protocol=protocol))
 
