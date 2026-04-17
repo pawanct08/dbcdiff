@@ -50,14 +50,33 @@ try {
         # Production optimisations
         "--python-flag=no_docstrings",
         "--python-flag=no_asserts",
-        "--lto=yes",                            # link-time optimisation
+        "--lto=no",                             # disable LTO; Zig 0.14.0 LTO exhausts RAM on large PySide6 builds
         "--assume-yes-for-downloads",           # auto-accept all Nuitka download prompts
         # Optional: obfuscation pass (comment out if it causes issues)
         # "--obfuscate-source",
         $entryPoint
     )
 
+    # ── LIB path fixup for Windows Store Python ─────────────────────────────
+    # Windows Store Python installs python313.lib to an ACL-protected
+    # WindowsApps directory.  Copy it once to C:\Temp\py313libs\ and tell
+    # the Zig linker (used by Nuitka when MSVC is too old) where to find it.
+    $libDir = "C:\Temp\py313libs"
+    if (-not (Test-Path "$libDir\python313.lib")) {
+        Write-Host "  → Copying python313.lib to $libDir ..." -ForegroundColor Yellow
+        $null = New-Item -ItemType Directory -Force -Path $libDir
+        $src  = (& $PYTHON -c "import sys,os; print(os.path.join(sys.prefix,'libs','python313.lib'))")
+        [System.IO.File]::Copy($src, "$libDir\python313.lib", $true)
+    }
+    $env:LIB = "$libDir;$env:LIB"
+
+    # Nuitka writes informational messages to stderr; temporarily allow that
+    # without aborting the script (ErrorActionPreference=Stop kills on any stderr).
+    $ErrorActionPreference = "Continue"
     & $PYTHON @nuitkaArgs
+    $nuitkaExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($nuitkaExit -ne 0) { throw "Nuitka exited with code $nuitkaExit" }
 
     # ── Step 3: report ───────────────────────────────────────────────────────
     $exe = Join-Path $distDir "dbcdiff.exe"
