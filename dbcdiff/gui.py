@@ -1,165 +1,371 @@
 """
-dbcdiff – PySide6 professional dark-theme GUI
+dbcdiff – PySide6 professional dark-theme GUI  (v2 – enhanced)
 """
 from __future__ import annotations
 
-import html
 import sys
-import traceback
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, QThread, QObject, Signal, QMimeData, QSize,
+    Qt, QThread, Signal, QObject, QMimeData, QSize,
 )
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont, QPalette
+from PySide6.QtGui import (
+    QColor, QDragEnterEvent, QDropEvent, QPalette,
+    QFont, QIcon,
+)
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSplitter,
-    QStatusBar, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QFileDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QSplitter, QStackedWidget, QStatusBar, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 import cantools
-
 from .engine import compare_databases, max_severity, Severity, DiffEntry
-from .protocol import detect_protocol
 
-# ── Dark-theme QSS ────────────────────────────────────────────────────────────
-_QSS = """
-QWidget {
+# ---------------------------------------------------------------------------
+# Severity display map  (enum name → display_label, bg, fg)
+# ---------------------------------------------------------------------------
+_SEV_MAP: dict[str, tuple[str, str, str]] = {
+    "BREAKING":   ("Critical", "#da3633", "#ffd7d5"),
+    "FUNCTIONAL": ("Major",    "#d29922", "#fde68a"),
+    "METADATA":   ("Minor",    "#1f7a6b", "#b3f0e8"),
+    "INFO":       ("Info",     "#8b949e", "#e6edf3"),
+}
+
+def _sev_display(sev: Severity) -> str:
+    return _SEV_MAP.get(sev.name, (sev.name.title(), "", ""))[0]
+
+def _sev_colors(sev: Severity) -> tuple[str, str]:
+    """Return (bg, fg) for the given severity."""
+    entry = _SEV_MAP.get(sev.name)
+    if entry:
+        return entry[1], entry[2]
+    return "#21262d", "#e6edf3"
+
+# ---------------------------------------------------------------------------
+# Views (tab definitions): name, icon, entity-set (None = all)
+# ---------------------------------------------------------------------------
+_VIEWS: list[tuple[str, str, Optional[set[str]]]] = [
+    ("All",      "📋", None),
+    ("Messages", "📨", {"message"}),
+    ("Signals",  "📡", {"signal"}),
+    ("Nodes",    "🔗", {"node"}),
+    ("ECUs",     "💡", {"ecu", "node", "environment_variable"}),
+]
+
+# ---------------------------------------------------------------------------
+# Protocol colours
+# ---------------------------------------------------------------------------
+_PROTO_COLORS: dict[str, tuple[str, str]] = {
+    "j1939":  ("#1e3a5f", "#7ec8e3"),
+    "canopen":("#2d1e5f", "#b8a9e3"),
+    "uds":    ("#1e4f1e", "#90ee90"),
+    "raw":    ("#21262d", "#8b949e"),
+    "":       ("#21262d", "#8b949e"),
+}
+
+# ---------------------------------------------------------------------------
+# Dark stylesheet
+# ---------------------------------------------------------------------------
+_QSS_DARK = """
+QMainWindow, QWidget {
     background-color: #0d1117;
     color: #e6edf3;
-    font-family: 'Segoe UI', 'SF Pro Text', 'Consolas', sans-serif;
+    font-family: "Segoe UI", "Inter", sans-serif;
     font-size: 13px;
 }
-QMainWindow {
-    background-color: #0d1117;
-}
-QFrame#drop_zone {
-    border: 2px dashed #30363d;
-    border-radius: 10px;
-    background-color: #161b22;
-}
-QFrame#drop_zone[drag_over="true"] {
-    border: 2px dashed #1f6feb;
-    background-color: #0d1f3c;
-}
-QLabel#drop_label {
-    color: #8b949e;
-    font-size: 14px;
-}
-QLabel#file_label {
+QLabel {
     color: #e6edf3;
-    font-size: 13px;
-    font-weight: bold;
-}
-QLabel#proto_badge {
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 11px;
-    font-weight: bold;
-}
-QGroupBox {
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    margin-top: 10px;
-    padding-top: 6px;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px;
-    color: #8b949e;
-    font-size: 11px;
 }
 QPushButton {
     background-color: #21262d;
+    color: #e6edf3;
     border: 1px solid #30363d;
     border-radius: 6px;
-    padding: 6px 16px;
-    color: #e6edf3;
+    padding: 6px 14px;
+    min-height: 28px;
 }
 QPushButton:hover {
     background-color: #30363d;
-    border-color: #8b949e;
+    border-color: #58a6ff;
 }
-QPushButton:pressed { background-color: #161b22; }
-QPushButton#compare_btn {
+QPushButton:pressed {
+    background-color: #161b22;
+}
+QPushButton#primary {
+    background-color: #238636;
+    border-color: #2ea043;
+    color: #ffffff;
+}
+QPushButton#primary:hover {
+    background-color: #2ea043;
+}
+QPushButton#active_filter {
     background-color: #1f6feb;
-    border: 1px solid #1f6feb;
-    font-weight: bold;
-    padding: 8px 24px;
-    font-size: 14px;
+    border-color: #58a6ff;
+    color: #ffffff;
 }
-QPushButton#compare_btn:hover { background-color: #388bfd; }
-QPushButton#compare_btn:disabled { background-color: #21262d; border-color: #30363d; color: #484f58; }
 QTableWidget {
     background-color: #161b22;
-    alternate-background-color: #1c2128;
-    border: 1px solid #30363d;
+    alternate-background-color: #0d1117;
     gridline-color: #21262d;
-    border-radius: 6px;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    selection-background-color: #1f3a5f;
 }
-QTableWidget::item { padding: 4px 8px; }
-QTableWidget::item:selected {
-    background-color: #1f3a5f;
-    color: #e6edf3;
+QTableWidget::item {
+    padding: 4px 8px;
+    border: none;
 }
 QHeaderView::section {
     background-color: #21262d;
+    color: #8b949e;
     border: none;
     border-bottom: 1px solid #30363d;
-    border-right: 1px solid #30363d;
     padding: 6px 8px;
-    font-weight: bold;
-    color: #8b949e;
-    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
 }
 QScrollBar:vertical {
     background: #161b22;
     width: 8px;
-    border-radius: 4px;
 }
 QScrollBar::handle:vertical {
     background: #30363d;
     border-radius: 4px;
     min-height: 20px;
 }
-QScrollBar::handle:vertical:hover { background: #484f58; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-QStatusBar { background-color: #161b22; border-top: 1px solid #30363d; color: #8b949e; }
-QSplitter::handle { background-color: #30363d; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QFrame#card {
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+}
+QFrame#drop_zone {
+    border: 2px dashed #30363d;
+    border-radius: 10px;
+    background-color: #161b22;
+}
+QFrame#drop_zone[drag=true] {
+    border-color: #1f6feb;
+    background-color: #1c2433;
+}
+QStatusBar {
+    background-color: #161b22;
+    border-top: 1px solid #30363d;
+    color: #8b949e;
+    font-size: 12px;
+}
+QTabWidget::pane {
+    border: 1px solid #30363d;
+    background-color: #0d1117;
+}
+QTabBar::tab {
+    background-color: #161b22;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-bottom: none;
+    padding: 6px 14px;
+    border-radius: 4px 4px 0 0;
+}
+QTabBar::tab:selected {
+    background-color: #21262d;
+    color: #e6edf3;
+    border-bottom-color: #21262d;
+}
+QTabBar::tab:hover {
+    background-color: #21262d;
+    color: #e6edf3;
+}
+QComboBox {
+    background-color: #21262d;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-height: 26px;
+}
+QComboBox:hover {
+    border-color: #58a6ff;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox QAbstractItemView {
+    background-color: #21262d;
+    color: #e6edf3;
+    selection-background-color: #1f3a5f;
+    border: 1px solid #30363d;
+}
+QLineEdit {
+    background-color: #21262d;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
 """
 
-# ── Protocol badge colours ─────────────────────────────────────────────────────
-_PROTO_COLORS = {
-    "J1939":     ("#7ee787", "#0d2911"),
-    "CAN FD":    ("#79c0ff", "#0d1f3c"),
-    "CAN XL":    ("#d2a8ff", "#2a1f4a"),
-    "Basic CAN": ("#ff7b72", "#3d1110"),
-    "Unknown":   ("#8b949e", "#21262d"),
+# ---------------------------------------------------------------------------
+# Light stylesheet
+# ---------------------------------------------------------------------------
+_QSS_LIGHT = """
+QMainWindow, QWidget {
+    background-color: #ffffff;
+    color: #24292f;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
 }
-
-# ── Severity colours (bg, fg) ────────────────────────────────────────────────
-_SEV_COLORS = {
-    "BREAKING":    ("#da3633", "#ffd7d5"),
-    "FUNCTIONAL":  ("#d29922", "#fde68a"),
-    "METADATA":    ("#6ba96b", "#cae8ca"),
-    "INFO":        ("#8b949e", "#e6edf3"),
+QLabel {
+    color: #24292f;
 }
+QPushButton {
+    background-color: #f6f8fa;
+    color: #24292f;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 6px 14px;
+    min-height: 28px;
+}
+QPushButton:hover {
+    background-color: #eaeef2;
+    border-color: #0969da;
+}
+QPushButton:pressed {
+    background-color: #d0d7de;
+}
+QPushButton#primary {
+    background-color: #1a7f37;
+    border-color: #1a7f37;
+    color: #ffffff;
+}
+QPushButton#primary:hover {
+    background-color: #1c8139;
+}
+QPushButton#active_filter {
+    background-color: #0969da;
+    border-color: #0969da;
+    color: #ffffff;
+}
+QTableWidget {
+    background-color: #ffffff;
+    alternate-background-color: #f6f8fa;
+    gridline-color: #d0d7de;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    selection-background-color: #dbeafe;
+}
+QTableWidget::item {
+    padding: 4px 8px;
+    border: none;
+    color: #24292f;
+}
+QHeaderView::section {
+    background-color: #f6f8fa;
+    color: #57606a;
+    border: none;
+    border-bottom: 1px solid #d0d7de;
+    padding: 6px 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+QScrollBar:vertical {
+    background: #f6f8fa;
+    width: 8px;
+}
+QScrollBar::handle:vertical {
+    background: #d0d7de;
+    border-radius: 4px;
+    min-height: 20px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QFrame#card {
+    background-color: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+}
+QFrame#drop_zone {
+    border: 2px dashed #d0d7de;
+    border-radius: 10px;
+    background-color: #f6f8fa;
+}
+QFrame#drop_zone[drag=true] {
+    border-color: #0969da;
+    background-color: #dbeafe;
+}
+QStatusBar {
+    background-color: #f6f8fa;
+    border-top: 1px solid #d0d7de;
+    color: #57606a;
+    font-size: 12px;
+}
+QTabWidget::pane {
+    border: 1px solid #d0d7de;
+    background-color: #ffffff;
+}
+QTabBar::tab {
+    background-color: #f6f8fa;
+    color: #57606a;
+    border: 1px solid #d0d7de;
+    border-bottom: none;
+    padding: 6px 14px;
+    border-radius: 4px 4px 0 0;
+}
+QTabBar::tab:selected {
+    background-color: #ffffff;
+    color: #24292f;
+    border-bottom-color: #ffffff;
+}
+QTabBar::tab:hover {
+    background-color: #eaeef2;
+    color: #24292f;
+}
+QComboBox {
+    background-color: #f6f8fa;
+    color: #24292f;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-height: 26px;
+}
+QComboBox:hover {
+    border-color: #0969da;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox QAbstractItemView {
+    background-color: #ffffff;
+    color: #24292f;
+    selection-background-color: #dbeafe;
+    border: 1px solid #d0d7de;
+}
+QLineEdit {
+    background-color: #ffffff;
+    color: #24292f;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+"""
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _sev_label(sev: Severity) -> str:
-    return sev.name.title() if sev else ""
-
-
-def _cell_item(text: str, align=Qt.AlignLeft | Qt.AlignVCenter) -> QTableWidgetItem:
+def _cell_item(text: str, align=Qt.AlignLeft) -> QTableWidgetItem:
     item = QTableWidgetItem(str(text))
-    item.setTextAlignment(align)
     item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+    item.setTextAlignment(align | Qt.AlignVCenter)
     return item
 
 
@@ -167,480 +373,569 @@ def _colored_item(text: str, bg: str, fg: str) -> QTableWidgetItem:
     item = _cell_item(text, Qt.AlignCenter)
     item.setBackground(QColor(bg))
     item.setForeground(QColor(fg))
+    f = item.font()
+    f.setBold(True)
+    item.setFont(f)
     return item
 
 
-# ── DBCDropZone ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Drop-zone widget
+# ---------------------------------------------------------------------------
 
 class DBCDropZone(QFrame):
-    """Drag-and-drop zone with file info panel."""
-    file_changed = Signal(str)   # emits path when file is set
+    file_chosen = Signal(str)
 
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
+    def __init__(self, label: str, parent=None):
         super().__init__(parent)
         self.setObjectName("drop_zone")
         self.setAcceptDrops(True)
-        self.setMinimumSize(220, 130)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumHeight(120)
         self._path: Optional[str] = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(6)
+        self._icon = QLabel("📂", self)
+        self._icon.setAlignment(Qt.AlignCenter)
+        self._icon.setStyleSheet("font-size: 28px; background: transparent; border: none;")
 
-        # Header row: title + browse button
-        top = QHBoxLayout()
-        title = QLabel(label)
-        title.setObjectName("file_label")
-        top.addWidget(title, 1)
-
-        browse_btn = QToolButton()
-        browse_btn.setText("Browse…")
-        browse_btn.setStyleSheet(
-            "QToolButton { border:1px solid #30363d; border-radius:4px;"
-            " padding:3px 10px; background:#21262d; }"
-            "QToolButton:hover { background:#30363d; }"
-        )
-        browse_btn.clicked.connect(self._browse)
-        top.addWidget(browse_btn)
-        layout.addLayout(top)
-
-        # Drop hint
-        self._hint = QLabel("Drop a .dbc file here")
-        self._hint.setObjectName("drop_label")
+        self._hint = QLabel(label, self)
         self._hint.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self._hint, 1)
+        self._hint.setStyleSheet("color: #8b949e; font-size: 12px; background: transparent; border: none;")
 
-        # File info row (hidden until file loaded)
-        self._info = QLabel("")
-        self._info.setObjectName("drop_label")
-        self._info.setWordWrap(True)
-        self._info.setAlignment(Qt.AlignCenter)
-        self._info.hide()
-        layout.addWidget(self._info)
+        self._filename = QLabel("", self)
+        self._filename.setAlignment(Qt.AlignCenter)
+        self._filename.setStyleSheet("color: #58a6ff; font-size: 12px; background: transparent; border: none;")
+        self._filename.setVisible(False)
 
-        # Protocol badge
-        self._proto_badge = QLabel("")
-        self._proto_badge.setObjectName("proto_badge")
-        self._proto_badge.setAlignment(Qt.AlignCenter)
-        self._proto_badge.hide()
-        layout.addWidget(self._proto_badge, 0, Qt.AlignHCenter)
+        btn = QPushButton("Browse…", self)
+        btn.setFixedWidth(90)
+        btn.clicked.connect(self._browse)
 
-    # ── drag ──────────────────────────────────────────────────────────────────
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.addStretch()
+        layout.addWidget(self._icon)
+        layout.addWidget(self._hint)
+        layout.addWidget(self._filename)
+        layout.addWidget(btn, alignment=Qt.AlignCenter)
+        layout.addStretch()
+
+    # ------------------------------------------------------------------
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select DBC file", "", "DBC Files (*.dbc);;All Files (*)"
+        )
+        if path:
+            self._set_path(path)
+
+    def _set_path(self, path: str):
+        self._path = path
+        name = Path(path).name
+        self._filename.setText(name)
+        self._filename.setVisible(True)
+        self._icon.setText("✅")
+        self._hint.setVisible(False)
+        self.file_chosen.emit(path)
+
+    @property
+    def path(self) -> Optional[str]:
+        return self._path
+
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
-            paths = [u.toLocalFile() for u in event.mimeData().urls()]
-            if any(p.lower().endswith(".dbc") for p in paths):
-                self.setProperty("drag_over", "true")
+            urls = event.mimeData().urls()
+            if any(u.toLocalFile().lower().endswith(".dbc") for u in urls):
+                self.setProperty("drag", True)
                 self.style().unpolish(self)
                 self.style().polish(self)
                 event.acceptProposedAction()
                 return
         event.ignore()
 
-    def dragLeaveEvent(self, event) -> None:
-        self.setProperty("drag_over", "false")
-        self.style().unpolish(self)
-        self.style().polish(self)
-        super().dragLeaveEvent(event)
-
-    def dropEvent(self, event: QDropEvent) -> None:
-        self.setProperty("drag_over", "false")
+    def dropEvent(self, event: QDropEvent):
+        self.setProperty("drag", False)
         self.style().unpolish(self)
         self.style().polish(self)
         for url in event.mimeData().urls():
             p = url.toLocalFile()
             if p.lower().endswith(".dbc"):
-                self._set_file(p)
-                event.acceptProposedAction()
-                return
-        event.ignore()
+                self._set_path(p)
+                break
+        event.acceptProposedAction()
 
-    # ── file ops ──────────────────────────────────────────────────────────────
-    def _browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open DBC file", "", "DBC files (*.dbc);;All files (*)"
-        )
-        if path:
-            self._set_file(path)
-
-    def _set_file(self, path: str) -> None:
-        self._path = path
-        fname = Path(path).name
-        try:
-            db = cantools.database.load_file(path)
-            proto = detect_protocol(db).value
-            stats = f"{len(db.messages)} msgs · {sum(len(m.signals) for m in db.messages)} signals"
-            self._info.setText(f"<b>{html.escape(fname)}</b><br/><span style='font-size:11px;color:#8b949e;'>{stats}</span>")
-            self._info.show()
-            self._hint.hide()
-
-            bg, fg = _PROTO_COLORS.get(proto, ("#8b949e", "#21262d"))
-            self._proto_badge.setText(proto)
-            self._proto_badge.setStyleSheet(
-                f"QLabel {{ background-color:{bg}; color:{fg};"
-                f" border-radius:4px; padding:2px 8px; font-size:11px; font-weight:bold; }}"
-            )
-            self._proto_badge.show()
-        except Exception:
-            self._info.setText(f"<b>{html.escape(fname)}</b>")
-            self._info.show()
-            self._hint.hide()
-            self._proto_badge.hide()
-
-        self.file_changed.emit(path)
-
-    def path(self) -> Optional[str]:
-        return self._path
-
-    def clear(self) -> None:
-        self._path = None
-        self._hint.show()
-        self._info.hide()
-        self._proto_badge.hide()
+    def dragLeaveEvent(self, event):
+        self.setProperty("drag", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
-# ── SummaryBadge ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Summary badge row
+# ---------------------------------------------------------------------------
 
-class SummaryBadge(QFrame):
-    """Coloured count chips for BREAKING / FUNCTIONAL / METADATA / Total."""
+class SummaryBadge(QWidget):
+    _CHIP_DEFS = [
+        ("total",      "Total",    "#21262d", "#e6edf3"),
+        ("BREAKING",   "Critical", "#da3633", "#ffd7d5"),
+        ("FUNCTIONAL", "Major",    "#d29922", "#fde68a"),
+        ("METADATA",   "Minor",    "#1f7a6b", "#b3f0e8"),
+    ]
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
         self._chips: dict[str, QLabel] = {}
-        for key, label, bg, fg in [
-            ("total",      "Total",      "#21262d", "#e6edf3"),
-            ("BREAKING",   "Breaking",   "#da3633", "#ffd7d5"),
-            ("FUNCTIONAL", "Functional", "#d29922", "#fde68a"),
-            ("METADATA",   "Metadata",   "#6ba96b", "#cae8ca"),
-        ]:
-            chip = QLabel("0")
-            chip.setAlignment(Qt.AlignCenter)
-            chip.setStyleSheet(
-                f"QLabel {{ background:{bg}; color:{fg}; border-radius:5px;"
-                f" padding:4px 12px; font-size:12px; font-weight:bold; }}"
-            )
-            chip.setToolTip(label)
-            chip.setMinimumWidth(60)
+        for key, label, bg, fg in self._CHIP_DEFS:
+            chip = self._make_chip(label, "0", bg, fg)
             self._chips[key] = chip
-            col_lbl = QLabel(label)
-            col_lbl.setAlignment(Qt.AlignCenter)
-            col_lbl.setStyleSheet("color:#8b949e; font-size:11px;")
-            grp = QVBoxLayout()
-            grp.setSpacing(2)
-            grp.addWidget(chip)
-            grp.addWidget(col_lbl)
-            layout.addLayout(grp)
+            layout.addWidget(chip)
         layout.addStretch()
 
-    def update(self, entries: list[DiffEntry]) -> None:  # type: ignore[override]
-        counts: dict[str, int] = {"total": len(entries), "BREAKING": 0, "FUNCTIONAL": 0, "METADATA": 0}
+    @staticmethod
+    def _make_chip(title: str, count: str, bg: str, fg: str) -> QLabel:
+        lbl = QLabel(f"{title}  <b>{count}</b>")
+        lbl.setStyleSheet(
+            f"background:{bg}; color:{fg}; border-radius:12px;"
+            f"padding:4px 12px; font-size:12px; border: none;"
+        )
+        return lbl
+
+    def update(self, entries: list[DiffEntry]):
+        counts: dict[str, int] = {k: 0 for k in self._chips}
         for e in entries:
-            k = e.severity.name if e.severity else "METADATA"
-            if k in counts:
-                counts[k] += 1
-        for key, chip in self._chips.items():
-            chip.setText(str(counts.get(key, 0)))
-
-    def clear_counts(self) -> None:
-        for chip in self._chips.values():
-            chip.setText("0")
+            counts["total"] += 1
+            counts[e.severity.name] = counts.get(e.severity.name, 0) + 1
+        for key, _, bg, fg in self._CHIP_DEFS:
+            n = counts.get(key, 0)
+            label_text = dict((k, l) for k, l, *_ in self._CHIP_DEFS)[key]
+            self._chips[key].setText(f"{label_text}  <b>{n}</b>")
 
 
-# ── CompareWorker ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Table columns
+# ---------------------------------------------------------------------------
+_COLUMNS = ["Severity", "Entity", "Kind", "Path", "Old Value", "New Value", "Detail", "Protocol"]
+_COL_WIDTHS = [80, 80, 80, 220, 130, 130, 200, 80]
 
-class CompareWorker(QObject):
-    finished = Signal(list)       # list[DiffEntry]
-    error    = Signal(str)        # error message
-
-    def __init__(self, path_a: str, path_b: str) -> None:
-        super().__init__()
-        self._path_a = path_a
-        self._path_b = path_b
-
-    def run(self) -> None:
-        try:
-            db_a = cantools.database.load_file(self._path_a)
-            db_b = cantools.database.load_file(self._path_b)
-            entries = compare_databases(db_a, db_b, path_a=self._path_a, path_b=self._path_b)
-            self.finished.emit(entries)
-        except Exception as exc:
-            self.error.emit(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}")
-
-
-# ── ResultsTable ──────────────────────────────────────────────────────────────
-
-_COLUMNS = ["Severity", "Kind", "Entity", "Path", "File A Value", "File B Value", "Protocol", "Detail"]
-_COL_WIDTHS = [90, 120, 180, 200, 130, 130, 90, 260]
+# ---------------------------------------------------------------------------
+# Results table
+# ---------------------------------------------------------------------------
 
 class ResultsTable(QTableWidget):
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(0, len(_COLUMNS), parent)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setColumnCount(len(_COLUMNS))
         self.setHorizontalHeaderLabels(_COLUMNS)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.horizontalHeader().setStretchLastSection(True)
-        self.verticalHeader().hide()
+        self.verticalHeader().setVisible(False)
+        self.setShowGrid(False)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QTableWidget.SelectRows)
-        self.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.setShowGrid(True)
-        self.setWordWrap(False)
+        self.setSortingEnabled(True)
+        self.horizontalHeader().setStretchLastSection(True)
         for i, w in enumerate(_COL_WIDTHS):
             self.setColumnWidth(i, w)
 
-    def populate(self, entries: list[DiffEntry], severity_filter: str = "ALL") -> None:
+    @staticmethod
+    def _entry_col_text(e: DiffEntry, col: int) -> str:
+        """Return the display text for a given column index."""
+        if col == 0:
+            return _sev_display(e.severity)
+        elif col == 1:
+            return e.entity
+        elif col == 2:
+            return e.kind
+        elif col == 3:
+            return e.path
+        elif col == 4:
+            return str(e.value_a) if e.value_a is not None else ""
+        elif col == 5:
+            return str(e.value_b) if e.value_b is not None else ""
+        elif col == 6:
+            return e.detail
+        elif col == 7:
+            return e.protocol
+        return ""
+
+    def populate(
+        self,
+        entries: list[DiffEntry],
+        severity_filter: str = "ALL",
+        entity_set: Optional[set[str]] = None,
+        param_col: Optional[int] = None,
+        param_value: str = "",
+    ):
+        self.setSortingEnabled(False)
         self.setRowCount(0)
-        visible = entries if severity_filter == "ALL" else [
-            e for e in entries if (e.severity.name if e.severity else "METADATA") == severity_filter
-        ]
-        self.setRowCount(len(visible))
-        for row, e in enumerate(visible):
-            sev_name = e.severity.name if e.severity else "METADATA"
-            bg, fg = _SEV_COLORS.get(sev_name, ("#21262d", "#e6edf3"))
 
-            sev_item = _colored_item(sev_name.title(), bg, fg)
-            self.setItem(row, 0, sev_item)
+        for e in entries:
+            # severity filter
+            if severity_filter != "ALL" and e.severity.name != severity_filter:
+                continue
+            # view/entity filter
+            if entity_set is not None and e.entity not in entity_set:
+                continue
+            # parameter column filter
+            if param_col is not None and param_value and param_value != "(all)":
+                if self._entry_col_text(e, param_col) != param_value:
+                    continue
 
-            kind_item = _cell_item(e.kind or "")
-            self.setItem(row, 1, kind_item)
+            row = self.rowCount()
+            self.insertRow(row)
 
-            self.setItem(row, 2, _cell_item(e.entity or ""))
-            self.setItem(row, 3, _cell_item(e.path or ""))
+            # Severity chip
+            bg, fg = _sev_colors(e.severity)
+            self.setItem(row, 0, _colored_item(_sev_display(e.severity), bg, fg))
 
-            val_a = str(e.value_a) if e.value_a is not None else "—"
-            val_b = str(e.value_b) if e.value_b is not None else "—"
-            self.setItem(row, 4, _cell_item(val_a))
-            self.setItem(row, 5, _cell_item(val_b))
-            self.setItem(row, 6, _cell_item(e.protocol or ""))
-            self.setItem(row, 7, _cell_item(e.detail or ""))
+            # Entity chip
+            proto = e.protocol or ""
+            pbg, pfg = _PROTO_COLORS.get(proto.lower(), _PROTO_COLORS[""])
+            self.setItem(row, 1, _colored_item(e.entity, pbg, pfg))
 
-            self.setRowHeight(row, 26)
+            # Kind
+            kind_colors = {
+                "added":   ("#1f4a1f", "#90ee90"),
+                "removed": ("#4a1f1f", "#ffaaaa"),
+                "changed": ("#3a3a1a", "#ffff99"),
+            }
+            kbg, kfg = kind_colors.get(e.kind.lower(), ("#21262d", "#e6edf3"))
+            self.setItem(row, 2, _colored_item(e.kind, kbg, kfg))
 
-    def clear_results(self) -> None:
-        self.setRowCount(0)
+            self.setItem(row, 3, _cell_item(e.path))
+            self.setItem(row, 4, _cell_item(str(e.value_a) if e.value_a is not None else ""))
+            self.setItem(row, 5, _cell_item(str(e.value_b) if e.value_b is not None else ""))
+            self.setItem(row, 6, _cell_item(e.detail))
+            self.setItem(row, 7, _cell_item(e.protocol))
+            self.setRowHeight(row, 28)
+
+        self.setSortingEnabled(True)
 
 
-# ── MainWindow ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Worker thread
+# ---------------------------------------------------------------------------
+
+class _Worker(QObject):
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, path_a: str, path_b: str):
+        super().__init__()
+        self._a = path_a
+        self._b = path_b
+
+    def run(self) -> None:
+        try:
+            db_a = cantools.database.load_file(self._a)
+            db_b = cantools.database.load_file(self._b)
+            results = compare_databases(db_a, db_b, path_a=self._a, path_b=self._b)
+            self.finished.emit(results)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
-
-    def __init__(self, preload_a: str | None = None) -> None:
+    def __init__(self):
         super().__init__()
-        self.setWindowTitle("dbcdiff — DBC File Comparator")
-        self.resize(1280, 800)
+        self.setWindowTitle("dbcdiff  |  DBC Diff Analyzer")
+        self.setMinimumSize(1100, 700)
         self._entries: list[DiffEntry] = []
-        self._thread: Optional[QThread] = None
-        self._active_filter = "ALL"
-        self._preload_a = preload_a
+        self._dark_theme = True
 
+        # ── central widget ──────────────────────────────────────────────────
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(16, 16, 16, 12)
-        root.setSpacing(12)
+        root.setContentsMargins(16, 12, 16, 8)
+        root.setSpacing(10)
 
-        # ── Title bar ─────────────────────────────────────────────────────────
-        title_lbl = QLabel("dbcdiff")
-        title_lbl.setStyleSheet("font-size:22px; font-weight:bold; color:#58a6ff;")
-        sub_lbl = QLabel("Professional DBC File Comparator")
-        sub_lbl.setStyleSheet("color:#8b949e; font-size:13px;")
-        title_row = QHBoxLayout()
-        title_col = QVBoxLayout()
-        title_col.setSpacing(0)
-        title_col.addWidget(title_lbl)
-        title_col.addWidget(sub_lbl)
-        title_row.addLayout(title_col)
-        title_row.addStretch()
+        # ── top bar ─────────────────────────────────────────────────────────
+        top_bar = QHBoxLayout()
+        title = QLabel("🔀  DBC Diff Analyzer")
+        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #58a6ff;")
+        top_bar.addWidget(title)
+        top_bar.addStretch()
 
-        sig_lbl = QLabel("⚡ Crafted with precision · by C T")
-        sig_lbl.setStyleSheet(
-            "color:#3fb950; font-size:11px; font-style:italic; letter-spacing:0.5px;"
-        )
-        sig_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        title_row.addWidget(sig_lbl)
+        # theme toggle button
+        self._theme_btn = QPushButton("☀  Light")
+        self._theme_btn.setFixedWidth(100)
+        self._theme_btn.setToolTip("Switch to light theme")
+        self._theme_btn.clicked.connect(self._toggle_theme)
+        top_bar.addWidget(self._theme_btn)
+        root.addLayout(top_bar)
 
-        root.addLayout(title_row)
+        # ── drop zones ───────────────────────────────────────────────────────
+        drop_row = QHBoxLayout()
+        drop_row.setSpacing(12)
+        self._drop_a = DBCDropZone("Drop Base DBC here\nor click Browse…")
+        self._drop_b = DBCDropZone("Drop Compare DBC here\nor click Browse…")
+        self._drop_a.file_chosen.connect(self._on_file_chosen)
+        self._drop_b.file_chosen.connect(self._on_file_chosen)
 
-        # ── Drop zones ────────────────────────────────────────────────────────
-        zones_row = QHBoxLayout()
-        self._zone_a = DBCDropZone("📁  File A  (reference)")
-        self._zone_b = DBCDropZone("📁  File B  (compare to)")
-        self._zone_a.file_changed.connect(self._on_file_changed)
-        self._zone_b.file_changed.connect(self._on_file_changed)
-        zones_row.addWidget(self._zone_a)
+        drop_row.addWidget(self._drop_a)
+        vs = QLabel("VS")
+        vs.setAlignment(Qt.AlignCenter)
+        vs.setStyleSheet("font-size: 18px; font-weight: 700; color: #8b949e; min-width: 30px;")
+        drop_row.addWidget(vs)
+        drop_row.addWidget(self._drop_b)
+        root.addLayout(drop_row)
 
-        vs_lbl = QLabel("vs")
-        vs_lbl.setAlignment(Qt.AlignCenter)
-        vs_lbl.setStyleSheet("color:#484f58; font-size:18px; font-weight:bold;")
-        vs_lbl.setFixedWidth(30)
-        zones_row.addWidget(vs_lbl)
-
-        zones_row.addWidget(self._zone_b)
-        root.addLayout(zones_row)
-
-        # ── Compare button ────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
+        # ── compare button ───────────────────────────────────────────────────
         self._compare_btn = QPushButton("⚡  Compare Files")
-        self._compare_btn.setObjectName("compare_btn")
+        self._compare_btn.setObjectName("primary")
         self._compare_btn.setEnabled(False)
-        self._compare_btn.clicked.connect(self._run_compare)
-        btn_row.addStretch()
-        btn_row.addWidget(self._compare_btn)
+        self._compare_btn.setFixedHeight(38)
+        self._compare_btn.clicked.connect(self._on_compare)
+        root.addWidget(self._compare_btn)
 
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self._clear_all)
-        btn_row.addWidget(clear_btn)
-
-        export_btn = QPushButton("Export HTML…")
-        export_btn.clicked.connect(self._export_html)
-        btn_row.addWidget(export_btn)
-
-        btn_row.addStretch()
-        root.addLayout(btn_row)
-
-        # ── Summary badges ────────────────────────────────────────────────────
+        # ── summary row ──────────────────────────────────────────────────────
+        summary_card = QFrame()
+        summary_card.setObjectName("card")
+        summary_layout = QHBoxLayout(summary_card)
+        summary_layout.setContentsMargins(12, 10, 12, 10)
         self._summary = SummaryBadge()
-        root.addWidget(self._summary)
+        summary_layout.addWidget(self._summary)
+        root.addWidget(summary_card)
 
-        # ── Filter buttons ─────────────────────────────────────────────────────
+        # ── filter + param-dropdown row ──────────────────────────────────────
         filter_row = QHBoxLayout()
-        filter_row.setSpacing(6)
-        filter_lbl = QLabel("Filter:")
-        filter_lbl.setStyleSheet("color:#8b949e;")
-        filter_row.addWidget(filter_lbl)
+        filter_row.setSpacing(8)
+
+        sev_lbl = QLabel("Severity:")
+        sev_lbl.setStyleSheet("color: #8b949e; font-size: 12px;")
+        filter_row.addWidget(sev_lbl)
+
         self._filter_btns: dict[str, QPushButton] = {}
-        for key, label in [("ALL", "All"), ("BREAKING", "Breaking"),
-                            ("FUNCTIONAL", "Functional"), ("METADATA", "Metadata")]:
+        for key, label in [
+            ("ALL",        "All"),
+            ("BREAKING",   "Critical"),
+            ("FUNCTIONAL", "Major"),
+            ("METADATA",   "Minor"),
+        ]:
             btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == "ALL")
-            btn.setStyleSheet(
-                "QPushButton { border:1px solid #30363d; border-radius:4px; padding:4px 12px; }"
-                "QPushButton:checked { background:#1f6feb; border-color:#1f6feb; }"
-            )
-            btn.clicked.connect(lambda checked, k=key: self._apply_filter(k))
-            filter_row.addWidget(btn)
+            btn.setFixedHeight(28)
+            btn.setCheckable(False)
+            btn.setProperty("filter_key", key)
+            btn.clicked.connect(self._on_filter_btn)
             self._filter_btns[key] = btn
+            filter_row.addWidget(btn)
+
+        # mark "All" active initially
+        self._current_filter = "ALL"
+        self._filter_btns["ALL"].setObjectName("active_filter")
+
+        filter_row.addSpacing(20)
+
+        # param column selector
+        param_lbl = QLabel("Filter by:")
+        param_lbl.setStyleSheet("color: #8b949e; font-size: 12px;")
+        filter_row.addWidget(param_lbl)
+
+        self._param_combo = QComboBox()
+        self._param_combo.setFixedWidth(130)
+        self._param_combo.addItem("(none)", None)
+        for i, col in enumerate(_COLUMNS):
+            self._param_combo.addItem(col, i)
+        self._param_combo.currentIndexChanged.connect(self._on_param_col_changed)
+        filter_row.addWidget(self._param_combo)
+
+        self._param_value_combo = QComboBox()
+        self._param_value_combo.setFixedWidth(180)
+        self._param_value_combo.setEditable(True)
+        self._param_value_combo.addItem("(all)")
+        self._param_value_combo.currentTextChanged.connect(self._on_param_value_changed)
+        filter_row.addWidget(self._param_value_combo)
+
         filter_row.addStretch()
         root.addLayout(filter_row)
 
-        # ── Results table ──────────────────────────────────────────────────────
-        self._table = ResultsTable()
-        root.addWidget(self._table, 1)
+        # ── tab widget (views) ───────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        self._view_tables: list[ResultsTable] = []
+        for name, icon, _ in _VIEWS:
+            tbl = ResultsTable()
+            self._view_tables.append(tbl)
+            self._tabs.addTab(tbl, f"{icon}  {name}")
 
-        # ── Status bar ────────────────────────────────────────────────────────
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        root.addWidget(self._tabs, stretch=1)
+
+        # ── status bar ───────────────────────────────────────────────────────
         self._status = QStatusBar()
         self.setStatusBar(self._status)
-        self._status.showMessage("Ready — drop two DBC files or use Browse…")
+        self._status.showMessage("Ready — drop two DBC files to compare")
 
-        _perm = QLabel("  ⚡ by C T  ")
-        _perm.setStyleSheet("color:#3fb950; font-size:10px; font-style:italic;")
-        self._status.addPermanentWidget(_perm)
+        # worker
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_Worker] = None
 
-        # Pre-load file supplied via --file-a (Explorer context menu)
-        if self._preload_a:
-            self._zone_a._set_file(self._preload_a)
+    # -----------------------------------------------------------------------
+    # File selection
+    # -----------------------------------------------------------------------
 
-    # ── Slots ─────────────────────────────────────────────────────────────────
+    def _on_file_chosen(self, _path: str):
+        ready = self._drop_a.path and self._drop_b.path
+        self._compare_btn.setEnabled(bool(ready))
+        if ready:
+            self._status.showMessage(f"Ready: {Path(self._drop_a.path).name}  ↔  {Path(self._drop_b.path).name}")
 
-    def _on_file_changed(self, _path: str) -> None:
-        both = self._zone_a.path() and self._zone_b.path()
-        self._compare_btn.setEnabled(bool(both))
+    # -----------------------------------------------------------------------
+    # Compare
+    # -----------------------------------------------------------------------
 
-    def _run_compare(self) -> None:
-        path_a = self._zone_a.path()
-        path_b = self._zone_b.path()
-        if not path_a or not path_b:
+    def _on_compare(self):
+        if not self._drop_a.path or not self._drop_b.path:
             return
-
         self._compare_btn.setEnabled(False)
-        self._status.showMessage("Comparing…")
-        self._table.clear_results()
-        self._summary.clear_counts()
+        self._status.showMessage("⏳  Analysing…")
+        for tbl in self._view_tables:
+            tbl.setRowCount(0)
 
-        worker = CompareWorker(path_a, path_b)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        self._worker = _Worker(self._drop_a.path, self._drop_b.path)
+        self._thread = QThread()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_compare_done)
+        self._worker.error.connect(self._on_compare_error)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.error.connect(self._thread.quit)
+        self._thread.start()
 
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_compare_done)
-        worker.error.connect(self._on_compare_error)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
-        self._thread = thread
-        thread.start()
-
-    def _on_compare_done(self, entries: list[DiffEntry]) -> None:
+    def _on_compare_done(self, entries: list[DiffEntry]):
         self._entries = entries
+        self._compare_btn.setEnabled(True)
         self._summary.update(entries)
-        self._apply_filter("ALL")
-        worst = max_severity(entries)
-        sev_str = worst.name.title() if worst else "Identical"
-        self._status.showMessage(
-            f"Done — {len(entries)} change(s) found · Worst severity: {sev_str}"
-        )
-        self._compare_btn.setEnabled(True)
-
-    def _on_compare_error(self, msg: str) -> None:
-        QMessageBox.critical(self, "Compare Error", msg)
-        self._status.showMessage("Error during comparison.")
-        self._compare_btn.setEnabled(True)
-
-    def _apply_filter(self, key: str) -> None:
-        self._active_filter = key
-        for k, btn in self._filter_btns.items():
-            btn.setChecked(k == key)
-        self._table.populate(self._entries, key)
-
-    def _clear_all(self) -> None:
-        self._zone_a.clear()
-        self._zone_b.clear()
-        self._entries = []
-        self._table.clear_results()
-        self._summary.clear_counts()
-        self._compare_btn.setEnabled(False)
-        self._status.showMessage("Cleared.")
-
-    def _export_html(self) -> None:
-        if not self._entries:
-            QMessageBox.information(self, "Nothing to export", "Run a comparison first.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export HTML Report", "dbcdiff_report.html", "HTML (*.html)"
-        )
-        if not path:
-            return
-        from .reporters.html_reporter import write_html
-        with open(path, "w", encoding="utf-8") as fp:
-            write_html(
-                self._entries, fp,
-                file_a=self._zone_a.path() or "",
-                file_b=self._zone_b.path() or "",
+        self._refresh_all_tabs()
+        worst = max((e.severity for e in entries), default=None)
+        if entries:
+            worst_label = _sev_display(worst) if worst else "None"
+            self._status.showMessage(
+                f"✅  {len(entries)} difference(s) found  •  Worst severity: {worst_label}"
             )
-        self._status.showMessage(f"Report exported → {path}")
+        else:
+            self._status.showMessage("✅  No differences — files are identical")
+        self._update_param_value_list(self._param_combo.currentIndex())
+
+    def _on_compare_error(self, msg: str):
+        self._compare_btn.setEnabled(True)
+        self._status.showMessage(f"❌  Error: {msg}")
+        QMessageBox.critical(self, "Compare Error", msg)
+
+    # -----------------------------------------------------------------------
+    # Filter helpers
+    # -----------------------------------------------------------------------
+
+    def _get_param_col(self) -> Optional[int]:
+        idx = self._param_combo.currentIndex()
+        data = self._param_combo.itemData(idx)
+        return data  # None if "(none)" selected
+
+    def _get_param_value(self) -> str:
+        return self._param_value_combo.currentText().strip()
+
+    def _refresh_table(self):
+        """Re-populate the currently visible tab."""
+        idx = self._tabs.currentIndex()
+        if 0 <= idx < len(_VIEWS) and 0 <= idx < len(self._view_tables):
+            _, _, entity_set = _VIEWS[idx]
+            tbl = self._view_tables[idx]
+            tbl.populate(
+                self._entries,
+                severity_filter=self._current_filter,
+                entity_set=entity_set,
+                param_col=self._get_param_col(),
+                param_value=self._get_param_value(),
+            )
+
+    def _refresh_all_tabs(self):
+        """Populate every tab."""
+        for tab_idx, (_, _, entity_set) in enumerate(_VIEWS):
+            if tab_idx < len(self._view_tables):
+                self._view_tables[tab_idx].populate(
+                    self._entries,
+                    severity_filter=self._current_filter,
+                    entity_set=entity_set,
+                    param_col=self._get_param_col(),
+                    param_value=self._get_param_value(),
+                )
+
+    def _update_param_value_list(self, combo_idx: int):
+        """Populate the param-value combo with distinct values for selected column."""
+        col = self._param_combo.itemData(combo_idx)
+        self._param_value_combo.blockSignals(True)
+        self._param_value_combo.clear()
+        self._param_value_combo.addItem("(all)")
+        if col is not None and self._entries:
+            seen: set[str] = set()
+            for e in self._entries:
+                val = ResultsTable._entry_col_text(e, col)
+                if val and val not in seen:
+                    seen.add(val)
+                    self._param_value_combo.addItem(val)
+        self._param_value_combo.blockSignals(False)
+
+    # -----------------------------------------------------------------------
+    # Slots
+    # -----------------------------------------------------------------------
+
+    def _on_filter_btn(self):
+        btn = self.sender()
+        key = btn.property("filter_key")
+        self._current_filter = key
+        # update button styles
+        for k, b in self._filter_btns.items():
+            if k == key:
+                b.setObjectName("active_filter")
+            else:
+                b.setObjectName("")
+            b.style().unpolish(b)
+            b.style().polish(b)
+        self._refresh_all_tabs()
+
+    def _on_tab_changed(self, idx: int):
+        self._refresh_table()
+
+    def _on_param_col_changed(self, idx: int):
+        self._update_param_value_list(idx)
+        self._refresh_all_tabs()
+
+    def _on_param_value_changed(self, _text: str):
+        self._refresh_all_tabs()
+
+    def _toggle_theme(self):
+        app = QApplication.instance()
+        self._dark_theme = not self._dark_theme
+        if self._dark_theme:
+            app.setStyleSheet(_QSS_DARK)
+            self._theme_btn.setText("☀  Light")
+            self._theme_btn.setToolTip("Switch to light theme")
+        else:
+            app.setStyleSheet(_QSS_LIGHT)
+            self._theme_btn.setText("🌙  Dark")
+            self._theme_btn.setToolTip("Switch to dark theme")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-def launch_gui(preload_a: str | None = None) -> None:
+def launch_gui():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("dbcdiff")
-    app.setApplicationVersion("0.2.0")
-    app.setStyleSheet(_QSS)
+    app.setStyleSheet(_QSS_DARK)
 
-    # Adjust palette for native widgets
+    # dark system palette
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor("#0d1117"))
     palette.setColor(QPalette.WindowText, QColor("#e6edf3"))
     palette.setColor(QPalette.Base, QColor("#161b22"))
-    palette.setColor(QPalette.AlternateBase, QColor("#1c2128"))
+    palette.setColor(QPalette.AlternateBase, QColor("#0d1117"))
     palette.setColor(QPalette.Text, QColor("#e6edf3"))
     palette.setColor(QPalette.Button, QColor("#21262d"))
     palette.setColor(QPalette.ButtonText, QColor("#e6edf3"))
@@ -648,10 +943,6 @@ def launch_gui(preload_a: str | None = None) -> None:
     palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
     app.setPalette(palette)
 
-    win = MainWindow(preload_a=preload_a)
+    win = MainWindow()
     win.show()
     sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    launch_gui()
