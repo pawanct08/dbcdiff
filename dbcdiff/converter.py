@@ -153,7 +153,7 @@ def dbc_to_excel(dbc_path: str, xlsx_path: str) -> None:
             msg.name,
             msg.length,
             senders,
-            "Yes" if msg.is_extended_id else "No",
+            "Yes" if msg.is_extended_frame else "No",
             msg.comment or "",
         ])
     _shade_alt_rows(ws_msg)
