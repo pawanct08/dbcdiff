@@ -1,0 +1,12 @@
+.vscode/**
+.gitignore
+node_modules/**
+out/maps/**
+src/**
+**/*.ts
+**/*.map
+**/*.json
+!package.json
+tsconfig.json
+vsc-extension-quickstart.md
+.eslintrc.json

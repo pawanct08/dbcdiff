@@ -11,17 +11,33 @@ license = { file = "LICENSE" }
 keywords = ["canbus", "dbc", "diff", "automotive", "cantools"]
 authors = [{ name = "pawanct08", email = "ctpawan08@gmail.com" }]
 requires-python = ">=3.10"
-dependencies = ["cantools>=41.0", "PySide6>=6.5"]
+dependencies = ["cantools>=41.0"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Interface Engine/Protocol Translator",
+    "Topic :: Software Development :: Version Control",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov"]
+gui = ["PySide6>=6.5"]
 
 [project.scripts]
 dbcdiff = "dbcdiff.cli:main"
 dbcdiff-gui = "dbcdiff.gui:launch_gui"
 
 [project.urls]
-Repository = "https://github.com/pawanct08/dbcdiff"
+Repository  = "https://github.com/pawanct08/dbcdiff"
+Issue-Tracker = "https://github.com/pawanct08/dbcdiff/issues"
+Changelog   = "https://github.com/pawanct08/dbcdiff/releases"
 
 [tool.setuptools.packages.find]
 where = ["."]

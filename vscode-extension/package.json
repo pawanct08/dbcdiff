@@ -1,0 +1,95 @@
+{
+  "name": "vscode-dbcdiff",
+  "displayName": "DBC Diff",
+  "description": "Semantic diff for CANbus DBC files — compare signal definitions, message attributes and more.",
+  "version": "0.1.0",
+  "publisher": "your-publisher-id",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pawanct08/dbcdiff"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "CAN",
+    "DBC",
+    "automotive",
+    "diff",
+    "cantools"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "dbc",
+        "aliases": ["DBC", "dbc"],
+        "extensions": [".dbc"],
+        "mimetypes": ["text/x-dbc"]
+      }
+    ],
+    "configuration": {
+      "title": "DBC Diff",
+      "properties": {
+        "dbcdiff.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to the Python interpreter that has dbcdiff installed. E.g. 'python3', '/usr/bin/python3', or a virtualenv path."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "dbcdiff.showDiffFromHead",
+        "title": "DBC: Show Semantic Diff (vs HEAD)",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "dbcdiff.comparePick",
+        "title": "DBC: Compare with…",
+        "icon": "$(compare-changes)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "resourceExtname == .dbc",
+          "command": "dbcdiff.showDiffFromHead",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "when": "resourceExtname == .dbc",
+          "command": "dbcdiff.showDiffFromHead",
+          "group": "2_workspace"
+        },
+        {
+          "when": "resourceExtname == .dbc",
+          "command": "dbcdiff.comparePick",
+          "group": "2_workspace"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}

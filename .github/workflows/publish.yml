@@ -1,0 +1,76 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]   # trigger when a GitHub Release is published
+
+permissions:
+  id-token: write  # required for PyPI Trusted Publishing (no API key needed)
+
+jobs:
+  build:
+    name: Build distribution packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ── Optional: run tests against the built wheel before publishing ─────────
+  test-wheel:
+    name: Smoke-test the built wheel
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install wheel
+        run: pip install dist/*.whl
+
+      - name: Run tests against installed package
+        run: pip install pytest && pytest --tb=short -q
+
+  # ── Publish to PyPI via Trusted Publishing ────────────────────────────────
+  # Before first use you must configure PyPI Trusted Publishing:
+  #   1. Log in to https://pypi.org → Your Projects → dbcdiff → Publishing
+  #   2. Add "GitHub Actions" publisher:
+  #        Owner:      <your-github-username>
+  #        Repository: dbcdiff
+  #        Workflow:   publish.yml
+  publish:
+    name: Publish to PyPI
+    needs: test-wheel
+    runs-on: ubuntu-latest
+    environment: pypi   # optional: create a "pypi" environment in GitHub repo settings
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No api-token needed when using Trusted Publishing

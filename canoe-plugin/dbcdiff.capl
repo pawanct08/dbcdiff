@@ -1,0 +1,149 @@
+/*
+ * dbcdiff.capl
+ * ============
+ * CANoe/CANalyzer CAPL script that calls dbcdiff_canoe.py before a
+ * measurement or automated test run.
+ *
+ * Setup
+ * -----
+ * 1. Copy dbcdiff_canoe.py and this file into your CANoe project folder.
+ * 2. In CANoe: Tools ▸ CAPL Browser – open this file in the desired
+ *    CAPL node (Simulation / Test node).
+ * 3. Set the four paths in the "DBC Diff Configuration" section below.
+ * 4. Optionally adjust SEVERITY_GATE.
+ *
+ * How it works
+ * ------------
+ * OnPreStart (or a TestCase if used in a test module):
+ *   - Calls Python via system() with the comparison arguments.
+ *   - Reads the generated JSON report to get the summary.
+ *   - Logs results to the Write window.
+ *   - If SEVERITY_GATE is breached, the test or measurement is aborted.
+ *
+ * Note: system() is available in CANoe >= 8.0.  In restricted
+ *       environments you may need to enable it under Options ▸
+ *       "Allow script execution with system()".
+ */
+
+includes
+{
+  // No extra includes required.
+}
+
+variables
+{
+  /* ── DBC Diff Configuration ─────────────────────────────────────────── */
+
+  // Full path to the baseline (reference) DBC file.
+  char BASE_DBC[512]  = "C:\\Project\\can\\vehicle_baseline.dbc";
+
+  // Full path to the new DBC file you are about to test.
+  char HEAD_DBC[512]  = "C:\\Project\\can\\vehicle_current.dbc";
+
+  // Full path to the Python interpreter (must have dbcdiff installed).
+  char PYTHON_EXE[512] = "python";
+
+  // Full path to the bridge script.
+  char SCRIPT_PATH[512] = "C:\\Project\\canoe-plugin\\dbcdiff_canoe.py";
+
+  // Output directory for HTML / JSON reports.
+  char REPORT_DIR[512] = "C:\\Temp\\dbc_diff_reports";
+
+  // Block the test/measurement if severity reaches this level:
+  //   METADATA   – any attribute/comment change
+  //   FUNCTIONAL – signal value, offset, factor, unit, etc.
+  //   BREAKING   – removed signals or messages
+  char SEVERITY_GATE[32] = "BREAKING";
+
+  /* ── Internal ────────────────────────────────────────────────────────── */
+  char g_cmdBuf[2048];
+  char g_htmlOut[1024];
+  char g_jsonOut[1024];
+  int  g_exitCode;
+  int  g_abortOnBreaking = 1;   // Set to 0 to log but never abort.
+}
+
+
+/*
+ * Call from OnPreStart to run the diff before the measurement starts.
+ */
+on preStart
+{
+  RunDbcDiff();
+}
+
+
+/*
+ * Alternatively, call RunDbcDiff() from a CAPL test case:
+ *
+ *   testcase TC_CheckDbcCompatibility()
+ *   {
+ *     RunDbcDiff();
+ *     testStep("DBC diff", "Severity gate", g_exitCode == 0 ? 1 : 0);
+ *   }
+ */
+
+
+void RunDbcDiff()
+{
+  long rc;
+
+  // Build output paths
+  snprintf(g_htmlOut, elcount(g_htmlOut), "%s\\diff_report.html", REPORT_DIR);
+  snprintf(g_jsonOut, elcount(g_jsonOut), "%s\\diff_report.json", REPORT_DIR);
+
+  // Build command string
+  snprintf(g_cmdBuf, elcount(g_cmdBuf),
+    "\"%s\" \"%s\" --base \"%s\" --head \"%s\" --html \"%s\" --json \"%s\" --severity %s",
+    PYTHON_EXE,
+    SCRIPT_PATH,
+    BASE_DBC,
+    HEAD_DBC,
+    g_htmlOut,
+    g_jsonOut,
+    SEVERITY_GATE
+  );
+
+  write("[dbcdiff] Running: %s", g_cmdBuf);
+
+  rc = system(g_cmdBuf);
+  g_exitCode = (int)rc;
+
+  LogDiffResult(g_exitCode);
+
+  if (g_abortOnBreaking && g_exitCode != 0)
+  {
+    write("[dbcdiff] ❌ Severity gate triggered (exit %d) — aborting.", g_exitCode);
+    stop();      // Abort measurement / test suite.
+  }
+  else
+  {
+    write("[dbcdiff] ✅ Gate passed (exit %d). Continuing.", g_exitCode);
+  }
+}
+
+
+void LogDiffResult(int exitCode)
+{
+  switch (exitCode)
+  {
+    case 0:
+      write("[dbcdiff] 🟢 DBC files are IDENTICAL — no changes.");
+      break;
+    case 1:
+      write("[dbcdiff] 🟡 DBC METADATA changes detected (comments/attributes).");
+      write("[dbcdiff]    HTML report: %s", g_htmlOut);
+      break;
+    case 2:
+      write("[dbcdiff] 🟠 DBC FUNCTIONAL changes detected (signal values/factors/units).");
+      write("[dbcdiff]    HTML report: %s", g_htmlOut);
+      break;
+    case 3:
+      write("[dbcdiff] 🔴 DBC BREAKING changes detected (removed signals or messages).");
+      write("[dbcdiff]    HTML report: %s", g_htmlOut);
+      break;
+    default:
+      write("[dbcdiff] ⚠  Unexpected exit code %d — check Python / dbcdiff installation.", exitCode);
+      break;
+  }
+}
