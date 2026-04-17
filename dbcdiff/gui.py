@@ -915,27 +915,59 @@ class _Worker(QObject):
 # ---------------------------------------------------------------------------
 
 _LICENSE_TEXT = """\
-MIT License
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
 
 Copyright (c) 2024  Pawan
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+You may obtain a copy of the License at
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
+    http://www.apache.org/licenses/LICENSE-2.0
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions. "License" means the terms and conditions for use as
+   defined by Sections 1 through 9 of this document.
+
+2. Grant of Copyright License. Each Contributor grants you a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   copyright license to reproduce, prepare Derivative Works of, publicly
+   display, publicly perform, sublicense, and distribute the Work.
+
+3. Grant of Patent License. Each Contributor grants you a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable patent
+   license to make, use, offer to sell, sell, import the Work.
+
+4. Redistribution. You may reproduce and distribute copies of the Work
+   provided that you meet the conditions stated in the License.
+
+5. Submission of Contributions. Any Contribution submitted for inclusion
+   in the Work shall be under the terms and conditions of this License.
+
+6. Trademarks. This License does not grant permission to use the trade
+   names or trademarks of the Licensor.
+
+7. Disclaimer of Warranty. The Work is provided on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+8. Limitation of Liability. In no event shall any Contributor be liable
+   for any damages arising as a result of this License.
+
+9. Accepting Warranty or Additional Liability. You may offer and charge
+   a fee for acceptance of support, warranty, or indemnity obligations.
+
+END OF TERMS AND CONDITIONS
 """
 
 

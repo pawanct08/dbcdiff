@@ -4,7 +4,7 @@
 > Compare two `.dbc` databases, detect what changed, and understand the impact — from the CLI or a modern dark-theme GUI.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![cantools 41+](https://img.shields.io/badge/cantools-41%2B-orange)](https://pypi.org/project/cantools/)
 
 ---
@@ -199,4 +199,6 @@ See [DESIGN.md](DESIGN.md) for full architecture documentation.
 
 ## License
 
-MIT © 2024 dbcdiff contributors
+Apache License 2.0 © 2024 dbcdiff contributors
+
+See [LICENSE](LICENSE) for the full license text.
