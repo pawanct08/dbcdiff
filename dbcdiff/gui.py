@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QStackedWidget, QStatusBar, QTableWidget,
-    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 import cantools
@@ -49,11 +49,13 @@ def _sev_colors(sev: Severity) -> tuple[str, str]:
 # Views (tab definitions): name, icon, entity-set (None = all)
 # ---------------------------------------------------------------------------
 _VIEWS: list[tuple[str, str, Optional[set[str]]]] = [
-    ("All",      "📋", None),
-    ("Messages", "📨", {"message"}),
-    ("Signals",  "📡", {"signal"}),
-    ("Nodes",    "🔗", {"node"}),
-    ("ECUs",     "💡", {"ecu", "node", "environment_variable"}),
+    ("All",        "📋", None),
+    ("Messages",   "📨", {"message"}),
+    ("Signals",    "📡", {"signal"}),
+    ("Nodes",      "🔗", {"node"}),
+    ("Attributes", "⚙",  {"attribute"}),
+    ("Env Vars",   "🌐", {"envvar"}),
+    ("J1939",      "🚛", {"j1939"}),
 ]
 
 # ---------------------------------------------------------------------------
@@ -66,6 +68,12 @@ _PROTO_COLORS: dict[str, tuple[str, str]] = {
     "raw":    ("#21262d", "#8b949e"),
     "":       ("#21262d", "#8b949e"),
 }
+
+
+def _esc(s: str) -> str:
+    """HTML-escape a string for use in QTextEdit HTML."""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 # ---------------------------------------------------------------------------
 # Dark stylesheet
@@ -585,9 +593,11 @@ class ResultsTable(QTableWidget):
             row = self.rowCount()
             self.insertRow(row)
 
-            # Severity chip
+            # Severity chip – store DiffEntry reference for detail panel
             bg, fg = _sev_colors(e.severity)
-            self.setItem(row, 0, _colored_item(_sev_display(e.severity), bg, fg))
+            _sev_item = _colored_item(_sev_display(e.severity), bg, fg)
+            _sev_item.setData(Qt.ItemDataRole.UserRole, e)
+            self.setItem(row, 0, _sev_item)
 
             # Entity chip
             proto = e.protocol or ""
@@ -612,13 +622,275 @@ class ResultsTable(QTableWidget):
 
         self.setSortingEnabled(True)
 
+    def current_entry(self) -> Optional[DiffEntry]:
+        """Return the DiffEntry for the currently selected row, or None."""
+        row = self.currentRow()
+        if row < 0:
+            return None
+        item = self.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+
+# ---------------------------------------------------------------------------
+# Detail / synopsis panel
+# ---------------------------------------------------------------------------
+
+class _DetailPanel(QWidget):
+    """Synopsis panel shown below the results table.
+
+    Displays structured, side-by-side detail for the selected DiffEntry,
+    including full signal/message metadata looked up from the loaded databases.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        _hdr = QLabel("  \u25c8  Detail \u2014 select a row above")
+        _hdr.setStyleSheet(
+            "background: #161b22; color: #8b949e; font-size: 11px; "
+            "padding: 4px 8px; border-top: 1px solid #30363d;"
+        )
+        layout.addWidget(_hdr)
+
+        self._text = QTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setStyleSheet(
+            "QTextEdit {"
+            "  background: #0d1117;"
+            "  color: #e6edf3;"
+            "  border: none;"
+            "  border-top: 1px solid #30363d;"
+            "  font-family: 'Courier New', Consolas, monospace;"
+            "  font-size: 12px;"
+            "  padding: 8px;"
+            "}"
+        )
+        self._text.setHtml(
+            "<span style='color:#8b949e; font-style:italic;'>"
+            "Select a row to see details\u2026"
+            "</span>"
+        )
+        layout.addWidget(self._text)
+
+        self._db_a = None
+        self._db_b = None
+
+    def set_databases(self, db_a, db_b) -> None:
+        self._db_a = db_a
+        self._db_b = db_b
+
+    def update_entry(self, entry) -> None:
+        if entry is None:
+            self._text.setHtml(
+                "<span style='color:#8b949e; font-style:italic;'>"
+                "Select a row to see details\u2026"
+                "</span>"
+            )
+            return
+        self._text.setHtml(self._build_html(entry))
+
+    # -----------------------------------------------------------------------
+    # HTML builders
+    # -----------------------------------------------------------------------
+
+    def _build_html(self, e) -> str:
+        kind_color = {
+            "added": "#90ee90", "removed": "#ffaaaa", "changed": "#ffff99",
+        }.get(e.kind.lower(), "#e6edf3")
+        header = (
+            f"<p style='margin:0 0 4px 0; font-size:11px;'>"
+            f"<b style='color:#58a6ff;'>{_esc(e.path)}</b>"
+            f"&nbsp;&nbsp;"
+            f"<span style='background:#21262d; padding:1px 6px;"
+            f" border-radius:3px; color:#8b949e;'>{_esc(e.entity)}</span>"
+            f"&nbsp;"
+            f"<span style='color:{kind_color};'>{_esc(e.kind)}</span>"
+            f"</p>"
+            f"<hr style='border:0; border-top:1px solid #30363d; margin:4px 0;'/>"
+        )
+        if e.entity == "signal":
+            body = self._signal_detail(e)
+        elif e.entity == "message":
+            body = self._message_detail(e)
+        elif e.entity == "node":
+            body = self._node_detail(e)
+        else:
+            body = self._generic_detail(e)
+        return header + body
+
+    @staticmethod
+    def _row(label: str, val_a, val_b) -> str:
+        def _fmt(v, color: str) -> str:
+            if v is None:
+                return "<span style='color:#555;'>\u2014</span>"
+            return f"<span style='color:{color};'>{_esc(str(v))}</span>"
+
+        changed = (
+            val_a is not None and val_b is not None
+            and str(val_a) != str(val_b)
+        )
+        bg = " background:#1e1e10;" if changed else ""
+        return (
+            f"<tr style='{bg}'>"
+            f"<td style='color:#8b949e; padding:2px 14px 2px 4px;"
+            f" white-space:nowrap; vertical-align:top;'>{_esc(label)}</td>"
+            f"<td style='padding:2px 14px 2px 4px; vertical-align:top;'>"
+            f"{_fmt(val_a, '#ffaaaa')}</td>"
+            f"<td style='padding:2px 4px; vertical-align:top;'>"
+            f"{_fmt(val_b, '#90ee90')}</td>"
+            f"</tr>"
+        )
+
+    @staticmethod
+    def _tbl(rows: str) -> str:
+        return (
+            "<table style='border-collapse:collapse; width:100%; font-size:12px;'>"
+            "<tr style='background:#161b22;'>"
+            "<th style='text-align:left; padding:3px 14px 3px 4px; color:#6e7681;"
+            " font-weight:normal; font-size:11px;'>Field</th>"
+            "<th style='text-align:left; padding:3px 14px; color:#ffaaaa;"
+            " font-weight:normal; font-size:11px;'>\u25c4 File A</th>"
+            "<th style='text-align:left; padding:3px 4px; color:#90ee90;"
+            " font-weight:normal; font-size:11px;'>\u25ba File B</th>"
+            "</tr>" + rows + "</table>"
+        )
+
+    # -----------------------------------------------------------------------
+
+    def _signal_detail(self, e) -> str:
+        parts = e.path.split(".")
+        if len(parts) < 2:
+            return self._generic_detail(e)
+        msg_name, sig_name = parts[0], parts[1]
+        sig_a = sig_b = msg_a = msg_b = None
+        if self._db_a:
+            try:
+                msg_a = self._db_a.get_message_by_name(msg_name)
+                sig_a = msg_a.get_signal_by_name(sig_name)
+            except Exception:
+                pass
+        if self._db_b:
+            try:
+                msg_b = self._db_b.get_message_by_name(msg_name)
+                sig_b = msg_b.get_signal_by_name(sig_name)
+            except Exception:
+                pass
+
+        def _info(sig, msg):
+            if sig is None:
+                return {}
+            choices_str = (
+                ", ".join(f"{k}={v}" for k, v in sig.choices.items())
+                if sig.choices else "\u2014"
+            )
+            return {
+                "Parent message": (
+                    f"{msg.name} (0x{msg.frame_id:03X})" if msg else "\u2014"
+                ),
+                "Senders": (
+                    ", ".join(msg.senders) if msg and msg.senders else "\u2014"
+                ),
+                "Receivers": (
+                    ", ".join(getattr(sig, "receivers", None) or []) or "\u2014"
+                ),
+                "Start bit": sig.start,
+                "Length (bits)": sig.length,
+                "Byte order": (
+                    str(getattr(sig, "byte_order", "")).split(".")[-1].lower()
+                    or "\u2014"
+                ),
+                "Scale": sig.scale,
+                "Offset": sig.offset,
+                "Min": sig.minimum,
+                "Max": sig.maximum,
+                "Unit": sig.unit or "\u2014",
+                "Choices / Values": choices_str,
+                "Is multiplexer": getattr(sig, "is_multiplexer", "\u2014"),
+                "Mux IDs": str(
+                    getattr(sig, "multiplexer_ids", None) or "\u2014"
+                ),
+                "Comment": (
+                    _esc(sig.comment or "").replace("\n", " ") or "\u2014"
+                ),
+            }
+
+        ia, ib = _info(sig_a, msg_a), _info(sig_b, msg_b)
+        if not ia and not ib:
+            return "<i style='color:#8b949e;'>Signal not found in loaded files.</i>"
+        keys = list(dict.fromkeys(list(ia) + list(ib)))
+        rows = "".join(self._row(k, ia.get(k), ib.get(k)) for k in keys)
+        return self._tbl(rows)
+
+    def _message_detail(self, e) -> str:
+        msg_name = e.path.split(".")[0]
+        msg_a = msg_b = None
+        if self._db_a:
+            try:
+                msg_a = self._db_a.get_message_by_name(msg_name)
+            except Exception:
+                pass
+        if self._db_b:
+            try:
+                msg_b = self._db_b.get_message_by_name(msg_name)
+            except Exception:
+                pass
+
+        def _info(msg):
+            if msg is None:
+                return {}
+            return {
+                "CAN ID (hex)": f"0x{msg.frame_id:03X}",
+                "CAN ID (dec)": msg.frame_id,
+                "DLC (bytes)": msg.length,
+                "Is extended ID": msg.is_extended_id,
+                "Is CAN FD": getattr(msg, "is_fd", False),
+                "Senders": ", ".join(msg.senders) if msg.senders else "\u2014",
+                "Signal count": len(msg.signals),
+                "Signals": ", ".join(s.name for s in msg.signals) or "\u2014",
+                "Comment": (
+                    _esc(msg.comment or "").replace("\n", " ") or "\u2014"
+                ),
+            }
+
+        ia, ib = _info(msg_a), _info(msg_b)
+        if not ia and not ib:
+            return "<i style='color:#8b949e;'>Message not found in loaded files.</i>"
+        keys = list(dict.fromkeys(list(ia) + list(ib)))
+        rows = "".join(self._row(k, ia.get(k), ib.get(k)) for k in keys)
+        return self._tbl(rows)
+
+    def _node_detail(self, e) -> str:
+        rows = (
+            self._row("Path", e.path, e.path)
+            + self._row("Value (A)", e.value_a, None)
+            + self._row("Value (B)", None, e.value_b)
+        )
+        if e.detail:
+            rows += self._row("Detail", e.detail, None)
+        return self._tbl(rows)
+
+    def _generic_detail(self, e) -> str:
+        rows = (
+            self._row("Path", e.path, e.path)
+            + self._row("Value (A)", e.value_a, None)
+            + self._row("Value (B)", None, e.value_b)
+        )
+        if e.detail:
+            rows += self._row("Detail", e.detail, None)
+        if e.protocol:
+            rows += self._row("Protocol", e.protocol, e.protocol)
+        return self._tbl(rows)
+
 
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
 
 class _Worker(QObject):
-    finished = Signal(list)
+    finished = Signal(list, object, object)   # results, db_a, db_b
     error = Signal(str)
 
     def __init__(self, path_a: str, path_b: str):
@@ -631,7 +903,7 @@ class _Worker(QObject):
             db_a = cantools.database.load_file(self._a)
             db_b = cantools.database.load_file(self._b)
             results = compare_databases(db_a, db_b, path_a=self._a, path_b=self._b)
-            self.finished.emit(results)
+            self.finished.emit(results, db_a, db_b)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -764,7 +1036,22 @@ class MainWindow(QMainWindow):
             self._tabs.addTab(tbl, f"{icon}  {name}")
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
-        root.addWidget(self._tabs, stretch=1)
+
+        # Wire row-selection in every results table to the detail panel
+        for _ti, _t in enumerate(self._view_tables):
+            _t.currentItemChanged.connect(
+                lambda cur, prev, ti=_ti: self._on_row_selected(ti)
+            )
+
+        # Detail / synopsis panel – sits below the results tabs in a splitter
+        self._detail = _DetailPanel()
+        _splitter = QSplitter(Qt.Orientation.Vertical)
+        _splitter.addWidget(self._tabs)
+        _splitter.addWidget(self._detail)
+        _splitter.setStretchFactor(0, 3)
+        _splitter.setStretchFactor(1, 1)
+        _splitter.setChildrenCollapsible(False)
+        root.addWidget(_splitter, stretch=1)
 
         # ── status bar ───────────────────────────────────────────────────────
         self._status = QStatusBar()
@@ -774,6 +1061,8 @@ class MainWindow(QMainWindow):
         # worker
         self._thread: Optional[QThread] = None
         self._worker: Optional[_Worker] = None
+        self._db_a = None
+        self._db_b = None
 
     # -----------------------------------------------------------------------
     # File selection
@@ -803,12 +1092,15 @@ class MainWindow(QMainWindow):
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_compare_done)
         self._worker.error.connect(self._on_compare_error)
-        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(lambda *_: self._thread.quit())
         self._worker.error.connect(self._thread.quit)
         self._thread.start()
 
-    def _on_compare_done(self, entries: list[DiffEntry]):
+    def _on_compare_done(self, entries: list[DiffEntry], db_a, db_b):
         self._entries = entries
+        self._db_a = db_a
+        self._db_b = db_b
+        self._detail.set_databases(db_a, db_b)
         self._compare_btn.setEnabled(True)
         self._summary.update(entries)
         self._refresh_all_tabs()
@@ -900,6 +1192,12 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, idx: int):
         self._refresh_table()
+
+    def _on_row_selected(self, table_idx: int) -> None:
+        """Update the detail panel when a row is selected in any results table."""
+        if 0 <= table_idx < len(self._view_tables):
+            entry = self._view_tables[table_idx].current_entry()
+            self._detail.update_entry(entry)
 
     def _on_param_col_changed(self, idx: int):
         self._update_param_value_list(idx)
