@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QObject, QMimeData, QSize,
+    Qt, QThread, Signal, QObject, QMimeData, QSize, QRect, QPoint,
 )
 from PySide6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent, QPalette,
-    QFont, QIcon,
+    QFont, QIcon, QPainter, QPen, QBrush,
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QProgressBar, QSplitter, QStackedWidget, QStatusBar, QTableWidget,
     QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QToolTip,
 )
 
 import cantools
@@ -1225,6 +1226,230 @@ class ConverterWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Bit-layout helpers
+# ---------------------------------------------------------------------------
+
+def _motorola_bits(start_bit: int, length: int) -> set[int]:
+    """Return the set of DBC bit positions occupied by a Motorola (big-endian) signal.
+
+    In DBC files the *start_bit* of a Motorola signal is its MSB position.
+    Traversal goes right within the byte (bit-in-byte decrements) then
+    wraps to the MSB of the next byte — identical to cantools' convention.
+
+    Verification: start=7, length=16
+        → {7,6,5,4,3,2,1,0, 15,14,13,12,11,10,9,8}  (bytes 0 and 1 fully covered) ✓
+    """
+    bits: set[int] = set()
+    b = start_bit
+    for _ in range(length):
+        bits.add(b)
+        if b % 8 == 0:   # reached the LSB of the current byte
+            b += 15      # jump to MSB of the *next* byte
+        else:
+            b -= 1
+    return bits
+
+
+def _signal_bits(sig) -> set[int]:
+    """Return DBC bit positions for *sig* regardless of byte order."""
+    if getattr(sig, "byte_order", "little_endian") == "big_endian":
+        return _motorola_bits(int(sig.start), int(sig.length))
+    return set(range(int(sig.start), int(sig.start) + int(sig.length)))
+
+
+# ---------------------------------------------------------------------------
+# Interactive bit-grid canvas
+# ---------------------------------------------------------------------------
+
+class _BitGridCanvas(QWidget):
+    """Custom QWidget that paints a DBC-compliant 8×8 bit-layout grid.
+
+    Layout (matches standard CAN / DBC tooling convention):
+        • Rows  = byte index 0 … 7   (top = byte 0)
+        • Cols  = bit within byte     (left-col = bit 7, right-col = bit 0)
+        • DBC bit number = row × 8 + (7 − col)
+
+    Features
+    --------
+    * Correct Motorola (big-endian) *and* Intel (little-endian) bit mapping
+    * Each signal gets a unique hue; filled cells show the abbreviated name
+    * Hover → cell highlight + QToolTip with signal name, unit and
+      physical-value formula  ``physical = raw × scale + offset``
+    * Responsive cell sizes (fills available width)
+    """
+
+    # Minimum cell geometry (pixels)
+    _MIN_CW = 44
+    _MIN_CH = 28
+    _HDR_H  = 20   # column-header row height
+    _HDR_W  = 50   # row-header (byte label) column width
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setMinimumSize(
+            self._HDR_W + 8 * self._MIN_CW,
+            self._HDR_H + 8 * self._MIN_CH,
+        )
+        self._signals: list = []
+        # (row, col) → (signal, QColor)
+        self._cell_map: dict[tuple[int, int], tuple] = {}
+        self._hover_rc: tuple[int, int] | None = None
+
+    # ── public API ──────────────────────────────────────────────────────────
+
+    def set_message(self, msg) -> None:
+        """Populate the canvas from a *cantools* message object (or None)."""
+        self._signals.clear()
+        self._cell_map.clear()
+        self._hover_rc = None
+        if msg is None:
+            self.update()
+            return
+        sigs = sorted(msg.signals, key=lambda s: s.name)
+        n = max(len(sigs), 1)
+        colors = [QColor.fromHsv(int(i * 360 / n), 165, 205) for i in range(n)]
+        for idx, sig in enumerate(sigs):
+            color = colors[idx]
+            for bit in _signal_bits(sig):
+                row, col = bit // 8, 7 - (bit % 8)
+                if 0 <= row < 8 and 0 <= col < 8:
+                    self._cell_map[(row, col)] = (sig, color)
+        self._signals = sigs
+        self.update()
+
+    # ── geometry helpers ────────────────────────────────────────────────────
+
+    def _cell_w(self) -> int:
+        return max(self._MIN_CW, (self.width() - self._HDR_W) // 8)
+
+    def _cell_h(self) -> int:
+        return max(self._MIN_CH, (self.height() - self._HDR_H) // 8)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._HDR_W + 8 * 58, self._HDR_H + 8 * 32)
+
+    def _cell_rect(self, row: int, col: int) -> QRect:
+        cw, ch = self._cell_w(), self._cell_h()
+        return QRect(self._HDR_W + col * cw, self._HDR_H + row * ch, cw, ch)
+
+    def _rc_from_pos(self, x: float, y: float) -> tuple[int, int] | None:
+        cw, ch = self._cell_w(), self._cell_h()
+        col = int(x - self._HDR_W) // cw
+        row = int(y - self._HDR_H) // ch
+        if 0 <= row < 8 and 0 <= col < 8:
+            return (row, col)
+        return None
+
+    # ── painting ────────────────────────────────────────────────────────────
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        C_BG         = QColor("#1c2128")
+        C_HDR        = QColor("#161b22")
+        C_BORDER     = QColor("#30363d")
+        C_HOVER_BORD = QColor("#58a6ff")
+        C_EMPTY      = QColor("#21262d")
+        C_HDR_TXT    = QColor("#8b949e")
+        C_CELL_TXT   = QColor("#0d1117")
+
+        p.fillRect(self.rect(), C_BG)
+
+        cw, ch = self._cell_w(), self._cell_h()
+
+        # ── small fonts ──
+        f_hdr = QFont()
+        f_hdr.setPointSize(7)
+        f_hdr.setBold(True)
+        f_cell = QFont()
+        f_cell.setPointSize(7)
+
+        # ── column headers  (bit-in-byte 7 … 0) ──
+        p.setFont(f_hdr)
+        p.setPen(C_HDR_TXT)
+        for col in range(8):
+            r = QRect(self._HDR_W + col * cw, 0, cw, self._HDR_H)
+            p.fillRect(r, C_HDR)
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(7 - col))
+
+        # ── row headers  (Byte 0 … 7) ──
+        for row in range(8):
+            r = QRect(0, self._HDR_H + row * ch, self._HDR_W, ch)
+            p.fillRect(r, C_HDR)
+            p.setPen(C_HDR_TXT)
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, f"B{row}")
+
+        # ── cells ──
+        p.setFont(f_cell)
+        for row in range(8):
+            for col in range(8):
+                r = self._cell_rect(row, col)
+                entry = self._cell_map.get((row, col))
+                is_hover = (row, col) == self._hover_rc
+
+                if entry:
+                    sig, base_color = entry
+                    fill = base_color.lighter(125) if is_hover else base_color
+                    p.fillRect(r, fill)
+                    # abbreviated signal name (up to 9 chars)
+                    abbr = sig.name if len(sig.name) <= 9 else sig.name[:8] + "…"
+                    p.setPen(C_CELL_TXT)
+                    p.drawText(
+                        r.adjusted(1, 1, -1, -1),
+                        Qt.AlignmentFlag.AlignCenter,
+                        abbr,
+                    )
+                else:
+                    p.fillRect(r, C_EMPTY)
+
+                # border
+                bord_pen = QPen(C_HOVER_BORD if is_hover else C_BORDER)
+                bord_pen.setWidth(2 if is_hover else 1)
+                p.setPen(bord_pen)
+                p.drawRect(r.adjusted(0, 0, -1, -1))
+
+        p.end()
+
+    # ── interaction ─────────────────────────────────────────────────────────
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        pos = event.position()
+        rc = self._rc_from_pos(pos.x(), pos.y())
+        if rc != self._hover_rc:
+            self._hover_rc = rc
+            self.update()
+        if rc and rc in self._cell_map:
+            sig, _ = self._cell_map[rc]
+            scale  = getattr(sig, "scale",  1)
+            offset = getattr(sig, "offset", 0)
+            unit   = getattr(sig, "unit",   "") or ""
+            # Build formula line
+            if scale == 1 and offset == 0:
+                formula = "physical = raw"
+            else:
+                sc_part = f"raw × {scale}" if scale != 1 else "raw"
+                if offset > 0:
+                    formula = f"physical = {sc_part} + {offset}"
+                elif offset < 0:
+                    formula = f"physical = {sc_part} − {abs(offset)}"
+                else:
+                    formula = f"physical = {sc_part}"
+            unit_part = f"  [{unit}]" if unit else ""
+            tip = f"{sig.name}{unit_part}\n{formula}"
+            QToolTip.showText(event.globalPosition().toPoint(), tip, self)
+        else:
+            QToolTip.hideText()
+
+    def leaveEvent(self, _event) -> None:  # noqa: N802
+        if self._hover_rc is not None:
+            self._hover_rc = None
+            self.update()
+        QToolTip.hideText()
+
+
+# ---------------------------------------------------------------------------
 # Single-file viewer dialog
 # ---------------------------------------------------------------------------
 
@@ -1375,88 +1600,75 @@ class ViewerDialog(QDialog):
     # ── Bit Layout ────────────────────────────────────────────────────────────
 
     def _build_bit_layout_tab(self) -> QWidget:
+        """Bit Layout tab — interactive DBC grid with correct Motorola mapping.
+
+        Rows = bytes 0–7, columns = bit-in-byte 7 (left) → 0 (right).
+        Signals rendered via :class:`_BitGridCanvas`; hover shows tooltip with
+        physical-value formula.  Legend below lists each signal's colour.
+        """
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
 
-        fr = QHBoxLayout()
-        fr.addWidget(QLabel("Message:"))
+        # ── top control row ──────────────────────────────────────────────────
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel("Message:"))
         msg_cb = QComboBox()
-        msgs = sorted(self._db.messages, key=lambda m: m.frame_id)
+        msgs = sorted(self._db.messages, key=lambda m: m.name)
         for m in msgs:
-            msg_cb.addItem(f"0x{m.frame_id:X}  {m.name}  (DLC={m.length})", m)
-        fr.addWidget(msg_cb)
-        fr.addStretch()
-        lay.addLayout(fr)
+            msg_cb.addItem(f"{m.name}   0x{m.frame_id:X}  (DLC={m.length})", m)
+        ctrl.addWidget(msg_cb, stretch=1)
+        lay.addLayout(ctrl)
 
-        note = QLabel(
-            "ℹ  Bit positions are exact for Intel (little-endian) signals.  "
-            "Motorola (big-endian) signals are shown from their start bit."
+        # ── hint label ───────────────────────────────────────────────────────
+        hint = QLabel(
+            "ℹ  Hover a cell for signal name and physical-value formula.  "
+            "Rows = bytes, columns = bit-in-byte (7 left → 0 right).  "
+            "Motorola (big-endian) and Intel (little-endian) both mapped correctly."
         )
-        note.setStyleSheet("color: #8b949e; font-size: 11px;")
-        note.setWordWrap(True)
-        lay.addWidget(note)
+        hint.setStyleSheet("color: #8b949e; font-size: 11px;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
 
+        # ── canvas inside a scroll area ──────────────────────────────────────
+        canvas = _BitGridCanvas()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(canvas)
+        scroll.setStyleSheet("QScrollArea { border: 1px solid #30363d; }")
+        lay.addWidget(scroll, stretch=1)
+
+        # ── legend strip ─────────────────────────────────────────────────────
         legend = QLabel()
         legend.setWordWrap(True)
         legend.setStyleSheet("font-size: 11px; padding: 4px 0;")
         lay.addWidget(legend)
 
-        NBYTES, NBITS = 8, 8
-        grid = QTableWidget(NBYTES, NBITS)
-        grid.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        grid.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        grid.setHorizontalHeaderLabels([f"  {7 - c}  " for c in range(NBITS)])
-        grid.setVerticalHeaderLabels([f"Byte {r}" for r in range(NBYTES)])
-        for r in range(NBYTES):
-            grid.setRowHeight(r, 38)
-        for c in range(NBITS):
-            grid.setColumnWidth(c, 72)
-        lay.addWidget(grid, stretch=1)
-
-        def _fill(idx: int = 0) -> None:
+        # ── refresh helper ───────────────────────────────────────────────────
+        def _refresh(idx: int) -> None:
             msg = msg_cb.itemData(idx)
             if msg is None:
                 return
-            sig_names = sorted(s.name for s in msg.signals)
-            sig_color: dict[str, tuple[str, str]] = {
-                name: self._CELL_COLORS[i % len(self._CELL_COLORS)]
-                for i, name in enumerate(sig_names)
-            }
-            bit_sig: dict[int, str] = {}
-            for s in msg.signals:
-                for b in range(int(s.start), int(s.start) + int(s.length)):
-                    if 0 <= b < NBYTES * NBITS:
-                        bit_sig[b] = s.name
-            for r in range(NBYTES):
-                for c in range(NBITS):
-                    bit_num = r * 8 + (7 - c)
-                    it = QTableWidgetItem(str(bit_num))
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    if bit_num in bit_sig:
-                        sname = bit_sig[bit_num]
-                        bg, fg = sig_color[sname]
-                        it.setBackground(QColor(bg))
-                        it.setForeground(QColor(fg))
-                        it.setToolTip(sname)
-                    else:
-                        it.setBackground(QColor("#21262d"))
-                        it.setForeground(QColor("#484f58"))
-                    grid.setItem(r, c, it)
-            parts = [
-                f'<span style="background:{bg}; color:{fg}; '
-                f'padding:2px 8px; border-radius:3px; margin:2px;">'
-                f'{_esc(name)}</span>'
-                for name, (bg, fg) in sorted(sig_color.items())
-            ]
-            legend.setText(
-                "  ".join(parts) if parts
-                else '<span style="color:#8b949e;">No signals in this message</span>'
-            )
+            canvas.set_message(msg)
+            color_map = canvas.get_signal_color_map()
+            if color_map:
+                badges = "  ".join(
+                    f'<span style="background:{c.name()}; color:#0d1117;'
+                    f' border-radius:3px; padding:2px 8px;">'
+                    f'{_esc(name)}</span>'
+                    for name, c in sorted(color_map.items())
+                )
+                legend.setText(f"<html><body>{badges}</body></html>")
+            else:
+                legend.setText(
+                    '<span style="color:#8b949e;">No signals in this message.</span>'
+                )
 
+        msg_cb.currentIndexChanged.connect(_refresh)
         if msgs:
-            _fill(0)
-        msg_cb.currentIndexChanged.connect(_fill)
+            _refresh(0)
+
         return w
 
     # ── Nodes ─────────────────────────────────────────────────────────────────

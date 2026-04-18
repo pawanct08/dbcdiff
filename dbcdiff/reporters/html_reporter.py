@@ -83,14 +83,21 @@ td.new  { color: #3fb950; }
 .bit-panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
              padding: 12px; }
 .bit-panel h4 { font-size: .75rem; color: #8b949e; margin-bottom: 6px; }
-.bit-grid { display: grid; grid-template-columns: repeat(8, 28px);
-            gap: 2px; font-size: .65rem; }
-.bit-cell { width: 28px; height: 28px; border-radius: 3px; display: flex;
-            align-items: center; justify-content: center;
-            border: 1px solid #30363d; color: #0d1117; font-weight: 600; }
-.bit-cell.unused { background: #21262d; color: #8b949e; border-color: #21262d; }
-.bit-legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-.bit-legend-item { display: flex; align-items: center; gap: 4px; font-size: .7rem; }
+/* Byte-grid table — row=byte, col=bit 7→0, Motorola-correct */
+.bg-grid { border-collapse: collapse; font-size: .65rem; }
+.bg-grid th, .bg-grid td { border: 1px solid #30363d; padding: 0;
+                            text-align: center; vertical-align: middle; }
+.bg-hdr { background: #0d1117; color: #8b949e; width: 28px; height: 22px; }
+.bg-byte-hdr { background: #0d1117; color: #8b949e; padding: 0 6px;
+               white-space: nowrap; font-size: .6rem; }
+.bg-cell { width: 28px; height: 28px; color: #0d1117; font-weight: 600;
+           font-size: .6rem; cursor: help; }
+.bg-cell .bg-name { display: block; max-width: 26px; overflow: hidden;
+                    font-size: .55rem; line-height: 1.15; }
+.bg-unused { background: #21262d !important; color: #484f58; }
+.bit-legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.bit-legend-item { display: flex; align-items: center; gap: 4px;
+                   font-size: .7rem; cursor: help; }
 .bit-legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
 """
 
@@ -272,42 +279,101 @@ _BIT_COLORS = [
 ]
 
 
+def _motorola_bits_html(start_bit: int, length: int) -> set[int]:
+    """DBC Motorola bit traversal: start_bit is the MSB in DBC numbering.
+
+    At each step: if the current bit is the first bit of a byte (b % 8 == 0)
+    jump to the MSB of the *next* byte (+15); otherwise step left (−1).
+    """
+    bits: set[int] = set()
+    b = start_bit
+    for _ in range(length):
+        bits.add(b)
+        if b % 8 == 0:
+            b += 15
+        else:
+            b -= 1
+    return bits
+
+
 def _build_signal_bit_map(msg) -> dict[int, str]:
-    """Return {bit_position: signal_name} for every bit in msg."""
+    """Return {bit_position: signal_name} for every bit in *msg*.
+
+    Motorola (big-endian) signals are traversed using the DBC convention;
+    Intel (little-endian) signals use a simple contiguous range.
+    """
     bit_map: dict[int, str] = {}
     for sig in msg.signals:
-        for i in range(sig.length):
-            bit_map[sig.start + i] = sig.name
+        if sig.byte_order == "big_endian":
+            positions = _motorola_bits_html(int(sig.start), int(sig.length))
+        else:
+            positions = set(range(int(sig.start), int(sig.start) + int(sig.length)))
+        for bit in positions:
+            bit_map[bit] = sig.name
     return bit_map
 
 
 def _render_bit_panel(title: str, msg, color_map: dict[str, str]) -> str:
-    """Render one side (old or new) of the bit-layout grid as HTML."""
-    total_bits = msg.length * 8
+    """Render one side (File A / File B) of the bit-layout grid as an HTML table.
+
+    Rows = bytes (0 … DLC-1); columns = bit-in-byte 7 (left/MSB) → 0 (right/LSB).
+    Each cell carries a ``title`` tooltip with the signal name and its
+    physical-value formula.
+    """
+    n_bytes = max(msg.length, 1)
     bit_map = _build_signal_bit_map(msg)
-    cells = []
-    for bit in range(total_bits):
-        sig_name = bit_map.get(bit)
-        if sig_name:
-            bg = color_map.get(sig_name, "#58a6ff")
-            cells.append(
-                f'<div class="bit-cell" style="background:{bg}" '
-                f'title="{html.escape(sig_name)} bit {bit}">{bit % 8}</div>'
-            )
-        else:
-            cells.append(f'<div class="bit-cell unused">{bit % 8}</div>')
-    grid = "\n    ".join(cells)
-    legend_items = ""
+
+    # Build signal → tooltip formula
+    sig_info: dict[str, str] = {}
+    for sig in msg.signals:
+        unit_str = f" {sig.unit}" if sig.unit else ""
+        sig_info[sig.name] = (
+            f"{sig.name}\nphysical = raw × {sig.scale} + {sig.offset}{unit_str}"
+        )
+
+    # Column header row: "Byte" + bit numbers 7..0
+    hdr = '<tr><th class="bg-hdr">Byte</th>' + "".join(
+        f'<th class="bg-hdr">{7 - c}</th>' for c in range(8)
+    ) + "</tr>\n"
+
+    rows = [hdr]
+    for r in range(n_bytes):
+        row_html = f'<td class="bg-byte-hdr">Byte {r}</td>'
+        for c in range(8):
+            bit_num = r * 8 + (7 - c)
+            sig_name = bit_map.get(bit_num)
+            if sig_name:
+                bg = color_map.get(sig_name, "#58a6ff")
+                abbrev = html.escape(sig_name[:5])
+                tip = html.escape(sig_info.get(sig_name, sig_name))
+                row_html += (
+                    f'<td class="bg-cell" style="background:{bg}" title="{tip}">'
+                    f'<span class="bg-name">{abbrev}</span></td>'
+                )
+            else:
+                row_html += (
+                    f'<td class="bg-cell bg-unused" title="bit {bit_num}">'
+                    f'{bit_num % 8}</td>'
+                )
+        rows.append(f"<tr>{row_html}</tr>\n")
+
+    table = '<table class="bg-grid">\n' + "".join(rows) + "</table>\n"
+
+    legend_html = ""
     for sig_name, color in color_map.items():
-        legend_items += (
-            f'<div class="bit-legend-item">'
+        tip = html.escape(sig_info.get(sig_name, sig_name))
+        legend_html += (
+            f'<div class="bit-legend-item" title="{tip}">'
             f'<div class="bit-legend-swatch" style="background:{color}"></div>'
             f'{html.escape(sig_name)}</div>'
         )
+
     return (
-        f'<div class="bit-panel"><h4>{html.escape(title)}</h4>'
-        f'<div class="bit-grid">\n    {grid}\n</div>'
-        f'<div class="bit-legend">{legend_items}</div></div>'
+        f'<div class="bit-panel">'
+        f'<h4>{html.escape(title)}</h4>'
+        f'{table}'
+        f'<div class="bit-legend">{legend_html}</div>'
+        f'</div>'
     )
 
 
