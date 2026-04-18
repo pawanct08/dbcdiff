@@ -629,3 +629,79 @@ def compare_three_way(db_base, db_a, db_b,
             conflict.extend([ea, eb])
 
     return ThreeWayResult(only_a, only_b, conflict, common)
+
+
+# ---------------------------------------------------------------------------
+# Bus-load analysis  (Timing Analysis tab)
+# ---------------------------------------------------------------------------
+
+#: Supported baud rates displayed in the UI dropdown
+BAUD_RATES: dict[str, int] = {
+    "125k":  125_000,
+    "250k":  250_000,
+    "500k":  500_000,
+    "1M":  1_000_000,
+    "2M":  2_000_000,   # CAN FD
+}
+
+
+def compute_bus_load(db, baud_rate: int) -> list[dict]:
+    """Return per-message bus-load records sorted by load% descending.
+
+    Skips messages with no cycle time (periodic load cannot be estimated).
+
+    Frame-bit count uses standard CAN overhead formulas:
+      * Standard (11-bit ID):  47 bits + 8×DLC
+      * Extended / FD (29-bit): 67 bits + 8×DLC
+    """
+    results: list[dict] = []
+    for m in db.messages:
+        if not m.cycle_time or m.cycle_time <= 0:
+            continue  # aperiodic / event-triggered — skip
+        is_ext = m.is_extended_frame or getattr(m, "is_fd", False)
+        overhead = 67 if is_ext else 47
+        frame_bits = overhead + 8 * m.length
+        cycle_s = m.cycle_time / 1000.0               # ms → s
+        load_pct = (frame_bits / baud_rate) / cycle_s * 100.0
+        results.append({
+            "name":        m.name,
+            "frame_id":    m.frame_id,
+            "dlc":         m.length,
+            "cycle_ms":    m.cycle_time,
+            "frame_bits":  frame_bits,
+            "load_pct":    load_pct,
+            "is_extended": is_ext,
+        })
+    results.sort(key=lambda r: r["load_pct"], reverse=True)
+    return results
+
+
+def compute_bus_load_delta(
+    db_a, db_b, baud_rate: int
+) -> list[dict]:
+    """Return per-message load delta between two DBCs.
+
+    Each entry includes ``load_pct_a``, ``load_pct_b``, and ``delta``
+    (positive = load increased in db_b).  Messages present in only one DB
+    are included with the absent side set to ``None``.
+    """
+    def _load_map(db) -> dict[str, float]:
+        return {r["name"]: r["load_pct"] for r in compute_bus_load(db, baud_rate)}
+
+    map_a = _load_map(db_a)
+    map_b = _load_map(db_b)
+    all_names = sorted(map_a.keys() | map_b.keys())
+
+    results: list[dict] = []
+    for name in all_names:
+        la = map_a.get(name)
+        lb = map_b.get(name)
+        delta = (lb or 0.0) - (la or 0.0)
+        results.append({
+            "name":       name,
+            "load_pct_a": la,
+            "load_pct_b": lb,
+            "delta":      delta,
+        })
+    results.sort(key=lambda r: abs(r["delta"]), reverse=True)
+    return results

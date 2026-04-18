@@ -19,12 +19,13 @@ from PySide6.QtWidgets import (
     QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QStackedWidget, QStatusBar, QTableWidget,
+    QProgressBar, QSplitter, QStackedWidget, QStatusBar, QTableWidget,
     QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 import cantools
-from .engine import compare_databases, max_severity, Severity, DiffEntry
+from .engine import (compare_databases, max_severity, Severity, DiffEntry,
+                     BAUD_RATES, compute_bus_load)
 from .converter import dbc_to_excel, excel_to_dbc
 
 # ---------------------------------------------------------------------------
@@ -1254,6 +1255,7 @@ class ViewerDialog(QDialog):
         tabs.addTab(self._build_bit_layout_tab(),    "🔢  Bit Layout")
         tabs.addTab(self._build_nodes_tab(),         "🔗  Nodes")
         tabs.addTab(self._build_consistency_tab(),   "⚠️  Consistency")
+        tabs.addTab(self._build_timing_tab(),        "⏱️  Timing")
         root.addWidget(tabs, stretch=1)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -1765,6 +1767,114 @@ class ViewerDialog(QDialog):
 
         _populate()
         filter_cb.currentTextChanged.connect(_populate)
+        return w
+
+    def _build_timing_tab(self) -> QWidget:
+        """6th tab: per-message CAN bus-load estimation with visual gauge."""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # ── Controls row ──────────────────────────────────────────────────
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(QLabel("Baud Rate:"))
+        baud_cb = QComboBox()
+        baud_cb.addItems(list(BAUD_RATES.keys()))
+        baud_cb.setCurrentText("500k")
+        baud_cb.setFixedWidth(90)
+        ctrl_row.addWidget(baud_cb)
+        ctrl_row.addSpacing(16)
+
+        total_lbl = QLabel("Total bus load:")
+        total_lbl.setStyleSheet("color:#8b949e;")
+        ctrl_row.addWidget(total_lbl)
+        load_val_lbl = QLabel("—")
+        load_val_lbl.setStyleSheet("font-weight:700; min-width:60px;")
+        ctrl_row.addWidget(load_val_lbl)
+        ctrl_row.addStretch()
+
+        skipped_lbl = QLabel("")
+        skipped_lbl.setStyleSheet("color:#8b949e; font-size:11px;")
+        ctrl_row.addWidget(skipped_lbl)
+        lay.addLayout(ctrl_row)
+
+        # ── Gauge bar ─────────────────────────────────────────────────────
+        gauge = QProgressBar()
+        gauge.setRange(0, 100)
+        gauge.setValue(0)
+        gauge.setFixedHeight(18)
+        gauge.setTextVisible(True)
+        gauge.setFormat("%p%")
+        lay.addWidget(gauge)
+
+        # ── Table ─────────────────────────────────────────────────────────
+        COLS = ["Message", "Frame ID", "DLC", "Cycle (ms)", "Frame Bits", "Load %"]
+        tbl = QTableWidget(0, len(COLS))
+        tbl.setHorizontalHeaderLabels(COLS)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tbl.setAlternatingRowColors(False)
+        tbl.setSortingEnabled(True)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(tbl, stretch=1)
+
+        def _refresh(baud_key: str = "500k") -> None:
+            baud = BAUD_RATES.get(baud_key, 500_000)
+            records = compute_bus_load(self._db, baud)
+
+            total_msgs = len(self._db.messages)
+            skipped = total_msgs - len(records)
+            skipped_lbl.setText(
+                (f"({skipped} message{'s' if skipped != 1 else ''} skipped "
+                 "\u2014 no cycle time)")
+                if skipped else ""
+            )
+
+            total_load = sum(r["load_pct"] for r in records)
+            load_val_lbl.setText(f"{total_load:.2f}%")
+
+            clamped = min(int(total_load), 100)
+            gauge.setValue(clamped)
+            if total_load > 100:
+                gauge.setStyleSheet("QProgressBar::chunk { background:#da3633; }")
+            elif total_load > 70:
+                gauge.setStyleSheet("QProgressBar::chunk { background:#d29922; }")
+            else:
+                gauge.setStyleSheet("QProgressBar::chunk { background:#238636; }")
+
+            tbl.setSortingEnabled(False)
+            tbl.setRowCount(len(records))
+            for row, r in enumerate(records):
+                lp = r["load_pct"]
+                if lp > 70:
+                    row_bg = QColor("#3d1a1a")
+                elif lp > 30:
+                    row_bg = QColor("#3d2e0a")
+                else:
+                    row_bg = QColor("#1a2d1a")
+
+                vals = [
+                    r["name"],
+                    f"0x{r['frame_id']:X}",
+                    str(r["dlc"]),
+                    str(r["cycle_ms"]),
+                    str(r["frame_bits"]),
+                    f"{lp:.4f}%",
+                ]
+                for col, val in enumerate(vals):
+                    it = QTableWidgetItem(val)
+                    it.setFlags(
+                        Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+                    )
+                    it.setBackground(row_bg)
+                    tbl.setItem(row, col, it)
+            tbl.setSortingEnabled(True)
+            tbl.resizeColumnsToContents()
+            tbl.horizontalHeader().setStretchLastSection(True)
+
+        _refresh("500k")
+        baud_cb.currentTextChanged.connect(_refresh)
         return w
 
 
