@@ -373,6 +373,67 @@ def _main_convert(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Export-matrix subcommand  (DBC → formatted Excel workbook)
+# ---------------------------------------------------------------------------
+
+def _main_export_matrix(argv: list[str]) -> int:
+    """Dispatch ``dbcdiff export-matrix FILE.dbc --out FILE.xlsx``."""
+    import argparse as _ap
+
+    p = _ap.ArgumentParser(
+        prog="dbcdiff export-matrix",
+        description=(
+            "Export a CAN DBC file to a formatted Excel workbook.\n\n"
+            "The output contains four sheets:\n"
+            "  Messages     – one row per CAN message\n"
+            "  Signals      – one row per signal with full attributes\n"
+            "  Value Tables – enumeration / choice entries\n"
+            "  Nodes        – TX and RX message summary per node"
+        ),
+        formatter_class=_ap.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("dbc_file", metavar="FILE.dbc",
+                   help="Input DBC file to export")
+    p.add_argument("--out", metavar="FILE.xlsx", required=True,
+                   help="Output Excel file path (.xlsx)")
+
+    args = p.parse_args(argv)
+
+    try:
+        db = cantools.database.load_file(args.dbc_file)
+    except FileNotFoundError:
+        print(f"Error: file not found – '{args.dbc_file}'", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Error loading '{args.dbc_file}': {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        from .reporters.excel_reporter import write_excel
+    except ImportError:
+        print(
+            "Error: openpyxl is required for export-matrix.\n"
+            "Install it with:  pip install openpyxl",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        write_excel(db, args.out)
+    except Exception as exc:
+        print(f"Error writing Excel: {exc}", file=sys.stderr)
+        return 1
+
+    msg_count = len(db.messages)
+    sig_count = sum(len(m.signals) for m in db.messages)
+    print(
+        f"Excel \u2192 {args.out}"
+        f"  ({msg_count} messages, {sig_count} signals)"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -383,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
         return _main_baseline(_argv[1:])
     if _argv and _argv[0] == "convert":
         return _main_convert(_argv[1:])
+    if _argv and _argv[0] == "export-matrix":
+        return _main_export_matrix(_argv[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)

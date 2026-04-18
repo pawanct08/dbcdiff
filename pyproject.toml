@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dbcdiff"
-version = "0.3.0"
+version = "0.4.0"
 description = "Semantically compare two CAN .dbc database files"
 readme = "README.md"
 license = { file = "LICENSE" }
 keywords = ["canbus", "dbc", "diff", "automotive", "cantools", "can-bus", "j1939", "dbc-diff", "vector-dbc"]
 authors = [{ name = "pawanct08", email = "ctpawan08@gmail.com" }]
 requires-python = ">=3.10"
-dependencies = ["cantools>=41.0"]
+dependencies = ["cantools>=41.0", "openpyxl>=3.1"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
