@@ -275,7 +275,7 @@ def _diff_nodes(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
     nodes_b = {n.name: n for n in (db_b.nodes or [])}
 
     for name in sorted(nodes_a.keys() - nodes_b.keys()):
-        entries.append(DiffEntry("node", REMOVED, Severity.FUNCTIONAL,
+        entries.append(DiffEntry("node", REMOVED, Severity.BREAKING,
                                   f"node.{name}", value_a=name,
                                   protocol=protocol))
 
@@ -315,7 +315,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
 
     for key in sorted(msgs_b.keys() - msgs_a.keys()):
         m = msgs_b[key]
-        entries.append(DiffEntry("message", ADDED, Severity.BREAKING,
+        entries.append(DiffEntry("message", ADDED, Severity.FUNCTIONAL,
                                   f"message.{m.name}(0x{m.frame_id:X})",
                                   value_b=m.name, protocol=protocol))
 
@@ -449,12 +449,7 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
     for name in added_names:
         if name in renamed_added:
             continue
-        sev = (
-            Severity.BREAKING
-            if _signals_overlap(sigs_b[name], sigs_a.values())
-            else Severity.FUNCTIONAL
-        )
-        entries.append(DiffEntry("signal", ADDED, sev,
+        entries.append(DiffEntry("signal", ADDED, Severity.FUNCTIONAL,
                                   f"{msg_prefix}.{name}", value_b=name,
                                   protocol=protocol))
 

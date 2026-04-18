@@ -1224,6 +1224,283 @@ class ConverterWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Single-file viewer dialog
+# ---------------------------------------------------------------------------
+
+class ViewerDialog(QDialog):
+    """Tabbed viewer for a single DBC file (Messages / Signals / Bit Layout / Nodes)."""
+
+    _CELL_COLORS: list[tuple[str, str]] = [
+        ("#1e4f1e", "#90ee90"), ("#1e3a5f", "#7ec8e3"),
+        ("#4f1e1e", "#ee9090"), ("#3a1e5f", "#c87ee3"),
+        ("#4f3a1e", "#e3c87e"), ("#1e4f4f", "#7ee3e3"),
+        ("#3f1e4f", "#d07ee3"), ("#1e3f1e", "#7ee3a0"),
+        ("#4f4f1e", "#e3e37e"), ("#1e4f3a", "#7ee3c8"),
+    ]
+
+    def __init__(self, db, filename: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"🔍  Viewer — {filename}")
+        self.setMinimumSize(1000, 680)
+        self._db = db
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_messages_tab(),   "📨  Messages")
+        tabs.addTab(self._build_signals_tab(),    "📡  Signals")
+        tabs.addTab(self._build_bit_layout_tab(), "🔢  Bit Layout")
+        tabs.addTab(self._build_nodes_tab(),      "🔗  Nodes")
+        root.addWidget(tabs, stretch=1)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn_box.rejected.connect(self.reject)
+        root.addWidget(btn_box)
+
+    # ── Messages ──────────────────────────────────────────────────────────────
+
+    def _build_messages_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        fr = QHBoxLayout()
+        fr.addWidget(QLabel("Filter by sender:"))
+        sender_cb = QComboBox()
+        sender_cb.addItem("(All senders)")
+        senders = sorted({s for m in self._db.messages for s in (m.senders or [])})
+        sender_cb.addItems(senders)
+        fr.addWidget(sender_cb)
+        fr.addStretch()
+        lay.addLayout(fr)
+
+        cols = ["Frame ID", "Name", "DLC", "Cycle Time (ms)", "Signals", "Comment"]
+        tbl = QTableWidget(0, len(cols))
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tbl.setAlternatingRowColors(True)
+        tbl.setSortingEnabled(True)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(tbl)
+
+        def _fill(sender_filter: str = "") -> None:
+            msgs = sorted(self._db.messages, key=lambda m: m.frame_id)
+            if sender_filter and sender_filter != "(All senders)":
+                msgs = [m for m in msgs if sender_filter in (m.senders or [])]
+            tbl.setSortingEnabled(False)
+            tbl.setRowCount(len(msgs))
+            for row, m in enumerate(msgs):
+                cycle = str(m.cycle_time) if m.cycle_time else ""
+                for col, val in enumerate([
+                    f"0x{m.frame_id:X}",
+                    m.name,
+                    str(m.length),
+                    cycle,
+                    str(len(m.signals)),
+                    m.comment or "",
+                ]):
+                    it = QTableWidgetItem(val)
+                    it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                    tbl.setItem(row, col, it)
+            tbl.setSortingEnabled(True)
+            tbl.resizeColumnsToContents()
+
+        _fill()
+        sender_cb.currentTextChanged.connect(_fill)
+        return w
+
+    # ── Signals ───────────────────────────────────────────────────────────────
+
+    def _build_signals_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        fr = QHBoxLayout()
+        fr.addWidget(QLabel("Filter by message:"))
+        msg_cb = QComboBox()
+        msg_cb.addItem("(All messages)", "")
+        for m in sorted(self._db.messages, key=lambda m: m.name):
+            msg_cb.addItem(f"{m.name}  (0x{m.frame_id:X})", m.name)
+        fr.addWidget(msg_cb)
+        fr.addStretch()
+        lay.addLayout(fr)
+
+        cols = ["Signal", "Message", "Start Bit", "Length", "Byte Order",
+                "Scale", "Offset", "Unit", "Min", "Max", "Comment"]
+        tbl = QTableWidget(0, len(cols))
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tbl.setAlternatingRowColors(True)
+        tbl.setSortingEnabled(True)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(tbl)
+
+        def _fill(_idx: int = 0) -> None:
+            filter_name: str = msg_cb.currentData() or ""
+            rows: list[tuple] = []
+            for m in sorted(self._db.messages, key=lambda m: m.name):
+                if filter_name and m.name != filter_name:
+                    continue
+                for s in sorted(m.signals, key=lambda s: s.name):
+                    bo = "Intel" if "little" in str(s.byte_order).lower() else "Motorola"
+                    rows.append((
+                        s.name, m.name, str(s.start), str(s.length), bo,
+                        str(s.scale), str(s.offset), s.unit or "",
+                        str(s.minimum) if s.minimum is not None else "",
+                        str(s.maximum) if s.maximum is not None else "",
+                        s.comment or "",
+                    ))
+            tbl.setSortingEnabled(False)
+            tbl.setRowCount(len(rows))
+            for row, vals in enumerate(rows):
+                for col, val in enumerate(vals):
+                    it = QTableWidgetItem(val)
+                    it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                    tbl.setItem(row, col, it)
+            tbl.setSortingEnabled(True)
+            tbl.resizeColumnsToContents()
+
+        _fill()
+        msg_cb.currentIndexChanged.connect(_fill)
+        return w
+
+    # ── Bit Layout ────────────────────────────────────────────────────────────
+
+    def _build_bit_layout_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        fr = QHBoxLayout()
+        fr.addWidget(QLabel("Message:"))
+        msg_cb = QComboBox()
+        msgs = sorted(self._db.messages, key=lambda m: m.frame_id)
+        for m in msgs:
+            msg_cb.addItem(f"0x{m.frame_id:X}  {m.name}  (DLC={m.length})", m)
+        fr.addWidget(msg_cb)
+        fr.addStretch()
+        lay.addLayout(fr)
+
+        note = QLabel(
+            "ℹ  Bit positions are exact for Intel (little-endian) signals.  "
+            "Motorola (big-endian) signals are shown from their start bit."
+        )
+        note.setStyleSheet("color: #8b949e; font-size: 11px;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        legend = QLabel()
+        legend.setWordWrap(True)
+        legend.setStyleSheet("font-size: 11px; padding: 4px 0;")
+        lay.addWidget(legend)
+
+        NBYTES, NBITS = 8, 8
+        grid = QTableWidget(NBYTES, NBITS)
+        grid.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        grid.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        grid.setHorizontalHeaderLabels([f"  {7 - c}  " for c in range(NBITS)])
+        grid.setVerticalHeaderLabels([f"Byte {r}" for r in range(NBYTES)])
+        for r in range(NBYTES):
+            grid.setRowHeight(r, 38)
+        for c in range(NBITS):
+            grid.setColumnWidth(c, 72)
+        lay.addWidget(grid, stretch=1)
+
+        def _fill(idx: int = 0) -> None:
+            msg = msg_cb.itemData(idx)
+            if msg is None:
+                return
+            sig_names = sorted(s.name for s in msg.signals)
+            sig_color: dict[str, tuple[str, str]] = {
+                name: self._CELL_COLORS[i % len(self._CELL_COLORS)]
+                for i, name in enumerate(sig_names)
+            }
+            bit_sig: dict[int, str] = {}
+            for s in msg.signals:
+                for b in range(int(s.start), int(s.start) + int(s.length)):
+                    if 0 <= b < NBYTES * NBITS:
+                        bit_sig[b] = s.name
+            for r in range(NBYTES):
+                for c in range(NBITS):
+                    bit_num = r * 8 + (7 - c)
+                    it = QTableWidgetItem(str(bit_num))
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if bit_num in bit_sig:
+                        sname = bit_sig[bit_num]
+                        bg, fg = sig_color[sname]
+                        it.setBackground(QColor(bg))
+                        it.setForeground(QColor(fg))
+                        it.setToolTip(sname)
+                    else:
+                        it.setBackground(QColor("#21262d"))
+                        it.setForeground(QColor("#484f58"))
+                    grid.setItem(r, c, it)
+            parts = [
+                f'<span style="background:{bg}; color:{fg}; '
+                f'padding:2px 8px; border-radius:3px; margin:2px;">'
+                f'{_esc(name)}</span>'
+                for name, (bg, fg) in sorted(sig_color.items())
+            ]
+            legend.setText(
+                "  ".join(parts) if parts
+                else '<span style="color:#8b949e;">No signals in this message</span>'
+            )
+
+        if msgs:
+            _fill(0)
+        msg_cb.currentIndexChanged.connect(_fill)
+        return w
+
+    # ── Nodes ─────────────────────────────────────────────────────────────────
+
+    def _build_nodes_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        cols = ["Name", "Comment", "TX Messages", "RX Signals"]
+        tbl = QTableWidget(0, len(cols))
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tbl.setAlternatingRowColors(True)
+        lay.addWidget(tbl)
+
+        nodes = sorted(self._db.nodes or [], key=lambda n: n.name)
+        node_tx: dict[str, list[str]] = {}
+        for m in self._db.messages:
+            for s in (m.senders or []):
+                node_tx.setdefault(s, []).append(m.name)
+        node_rx: dict[str, int] = {}
+        for m in self._db.messages:
+            for sig in m.signals:
+                for r in (sig.receivers or []):
+                    node_rx[r] = node_rx.get(r, 0) + 1
+
+        tbl.setRowCount(len(nodes))
+        for row, n in enumerate(nodes):
+            for col, val in enumerate([
+                n.name,
+                n.comment or "",
+                str(len(node_tx.get(n.name, []))),
+                str(node_rx.get(n.name, 0)),
+            ]):
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                if col >= 2:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                tbl.setItem(row, col, it)
+        tbl.resizeColumnsToContents()
+        return w
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -1273,13 +1550,20 @@ class MainWindow(QMainWindow):
         drop_row.addWidget(self._drop_b)
         root.addLayout(drop_row)
 
-        # ── compare button ───────────────────────────────────────────────────
+        # ── compare + visualize buttons ──────────────────────────────────────
         self._compare_btn = QPushButton("⚡  Compare Files")
         self._compare_btn.setObjectName("primary")
         self._compare_btn.setEnabled(False)
         self._compare_btn.setFixedHeight(38)
         self._compare_btn.clicked.connect(self._on_compare)
-        root.addWidget(self._compare_btn)
+        self._visualize_btn = QPushButton("🔍  Visualize File")
+        self._visualize_btn.setEnabled(False)
+        self._visualize_btn.setFixedHeight(38)
+        self._visualize_btn.clicked.connect(self._on_visualize)
+        _btn_row = QHBoxLayout()
+        _btn_row.addWidget(self._compare_btn, stretch=3)
+        _btn_row.addWidget(self._visualize_btn, stretch=1)
+        root.addLayout(_btn_row)
 
         # ── summary row ──────────────────────────────────────────────────────
         summary_card = QFrame()
@@ -1350,6 +1634,24 @@ class MainWindow(QMainWindow):
             self._view_tables.append(tbl)
             self._tabs.addTab(tbl, f"{icon}  {name}")
 
+        # ── wrap Nodes tab in QStackedWidget (diff view + inventory view) ────
+        _NODES_IDX = next(i for i, (n, _, _) in enumerate(_VIEWS) if n == "Nodes")
+        _node_icon = _VIEWS[_NODES_IDX][1]
+        _node_diff_tbl = self._view_tables[_NODES_IDX]
+        self._node_inv_tbl = QTableWidget(0, 4)
+        self._node_inv_tbl.setHorizontalHeaderLabels(
+            ["Name", "Comment", "TX Messages", "RX Signals"]
+        )
+        self._node_inv_tbl.horizontalHeader().setStretchLastSection(True)
+        self._node_inv_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._node_inv_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._node_inv_tbl.setAlternatingRowColors(True)
+        self._node_stack = QStackedWidget()
+        self._node_stack.addWidget(_node_diff_tbl)      # page 0: diff
+        self._node_stack.addWidget(self._node_inv_tbl)  # page 1: inventory
+        self._tabs.removeTab(_NODES_IDX)
+        self._tabs.insertTab(_NODES_IDX, self._node_stack, f"{_node_icon}  Nodes")
+
         # ── converter tab ────────────────────────────────────────────────────
         self._converter_tab = ConverterWidget()
         self._tabs.addTab(self._converter_tab, "🔄  Converter")
@@ -1390,6 +1692,7 @@ class MainWindow(QMainWindow):
     def _on_file_chosen(self, _path: str):
         ready = self._drop_a.path and self._drop_b.path
         self._compare_btn.setEnabled(bool(ready))
+        self._visualize_btn.setEnabled(bool(self._drop_a.path or self._drop_b.path))
         if ready:
             self._status.showMessage(f"Ready: {Path(self._drop_a.path).name}  ↔  {Path(self._drop_b.path).name}")
 
@@ -1423,6 +1726,12 @@ class MainWindow(QMainWindow):
         self._compare_btn.setEnabled(True)
         self._summary.update(entries)
         self._refresh_all_tabs()
+        # ── node tab: show diff or inventory fallback ─────────────────────────
+        if any(e.entity == "node" for e in entries):
+            self._node_stack.setCurrentIndex(0)   # diff table
+        else:
+            self._populate_node_inventory(db_a, db_b)
+            self._node_stack.setCurrentIndex(1)   # inventory table
         worst = max((e.severity for e in entries), default=None)
         if entries:
             worst_label = _sev_display(worst) if worst else "None"
@@ -1437,6 +1746,50 @@ class MainWindow(QMainWindow):
         self._compare_btn.setEnabled(True)
         self._status.showMessage(f"❌  Error: {msg}")
         QMessageBox.critical(self, "Compare Error", msg)
+
+    def _populate_node_inventory(self, db_a, db_b) -> None:
+        """Fill the static node inventory table (shown when no node diffs exist)."""
+        db = db_b or db_a
+        if db is None:
+            return
+        nodes = sorted(db.nodes or [], key=lambda n: n.name)
+        node_tx: dict[str, list[str]] = {}
+        for msg in db.messages:
+            for sender in (msg.senders or []):
+                node_tx.setdefault(sender, []).append(msg.name)
+        node_rx: dict[str, int] = {}
+        for msg in db.messages:
+            for sig in msg.signals:
+                for recv in (sig.receivers or []):
+                    node_rx[recv] = node_rx.get(recv, 0) + 1
+        tbl = self._node_inv_tbl
+        tbl.setRowCount(len(nodes))
+        for row, node in enumerate(nodes):
+            for col, val in enumerate([
+                node.name,
+                node.comment or "",
+                str(len(node_tx.get(node.name, []))),
+                str(node_rx.get(node.name, 0)),
+            ]):
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                if col >= 2:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                tbl.setItem(row, col, it)
+        tbl.resizeColumnsToContents()
+
+    def _on_visualize(self) -> None:
+        """Open the single-file viewer dialog for the most recently loaded file."""
+        path = self._drop_b.path or self._drop_a.path
+        if not path:
+            return
+        try:
+            db = cantools.database.load_file(path)
+        except Exception as exc:  # pylint: disable=broad-except
+            QMessageBox.critical(self, "Load Error", str(exc))
+            return
+        dlg = ViewerDialog(db, Path(path).name, self)
+        dlg.exec()
 
     # -----------------------------------------------------------------------
     # Filter helpers
