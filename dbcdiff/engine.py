@@ -210,6 +210,91 @@ def _diff_j1939_fields(ma, mb, msg_name: str, protocol: str,
 
 
 # ---------------------------------------------------------------------------
+# Cross-message signal rename resolution (post-pass)
+# ---------------------------------------------------------------------------
+
+def _parse_msg_name_from_path(path: str) -> str:
+    """Extract 'MsgName' from a path like 'message.MsgName(0xXX).SigName'."""
+    if not path.startswith("message."):
+        return ""
+    rest = path[len("message."):]
+    paren_pos = rest.find("(")
+    return rest[:paren_pos] if paren_pos >= 0 else rest.split(".")[0]
+
+
+def _resolve_cross_message_signal_renames(
+        entries: list[DiffEntry], db_a, db_b, protocol: str) -> list[DiffEntry]:
+    """Post-pass: upgrade REMOVED+ADDED signal pairs that share fingerprints but
+    live in *different* messages to a single RENAME entry.
+
+    Within-message renames are already handled by _diff_signals(). This pass
+    only promotes cross-message cases that fall through as plain REMOVED+ADDED.
+    """
+    sig_by_key_a: dict[tuple, object] = {
+        (m.name, s.name): s for m in db_a.messages for s in m.signals
+    }
+    sig_by_key_b: dict[tuple, object] = {
+        (m.name, s.name): s for m in db_b.messages for s in m.signals
+    }
+
+    removed_sig: list[DiffEntry] = []
+    added_sig:   list[DiffEntry] = []
+    other:       list[DiffEntry] = []
+
+    for e in entries:
+        if e.entity == "signal" and e.kind == REMOVED:
+            removed_sig.append(e)
+        elif e.entity == "signal" and e.kind == ADDED:
+            added_sig.append(e)
+        else:
+            other.append(e)
+
+    fp_to_removed_e: dict[tuple, DiffEntry] = {}
+    for e in removed_sig:
+        msg_name = _parse_msg_name_from_path(e.path)
+        sig_name = e.value_a or ""
+        sig_obj = sig_by_key_a.get((msg_name, sig_name))
+        if sig_obj is not None:
+            fp = _sig_fingerprint(sig_obj)
+            if fp not in fp_to_removed_e:
+                fp_to_removed_e[fp] = e
+
+    matched_removed: set[int] = set()
+    matched_added:   set[int] = set()
+    rename_entries:  list[DiffEntry] = []
+
+    for e in added_sig:
+        msg_name = _parse_msg_name_from_path(e.path)
+        sig_name = e.value_b or ""
+        sig_obj = sig_by_key_b.get((msg_name, sig_name))
+        if sig_obj is not None:
+            fp = _sig_fingerprint(sig_obj)
+            if fp in fp_to_removed_e:
+                e_removed = fp_to_removed_e.pop(fp)
+                matched_removed.add(id(e_removed))
+                matched_added.add(id(e))
+                old_msg = _parse_msg_name_from_path(e_removed.path)
+                new_msg = _parse_msg_name_from_path(e.path)
+                rename_entries.append(DiffEntry(
+                    entity="signal",
+                    kind=RENAME,
+                    severity=Severity.METADATA,
+                    path=e_removed.path,
+                    value_a=f"{old_msg}.{e_removed.value_a}",
+                    value_b=f"{new_msg}.{e.value_b}",
+                    detail=(f"moved {e_removed.value_a!r} from {old_msg!r} "
+                            f"→ {e.value_b!r} in {new_msg!r}"),
+                    protocol=protocol,
+                ))
+
+    result = other
+    result.extend(e for e in removed_sig if id(e) not in matched_removed)
+    result.extend(e for e in added_sig   if id(e) not in matched_added)
+    result.extend(rename_entries)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -255,6 +340,7 @@ def compare_databases(db_a, db_b,
     entries.extend(_diff_db_attributes(db_a, db_b))
     entries.extend(_diff_envvars(db_a, db_b))
 
+    entries = _resolve_cross_message_signal_renames(entries, db_a, db_b, proto_label)
     entries = _expand_choices_diff(entries)
     entries.sort(key=lambda e: -e.severity)
     return entries
@@ -307,13 +393,53 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
     msgs_a = {_msg_key(m): m for m in db_a.messages}
     msgs_b = {_msg_key(m): m for m in db_b.messages}
 
-    for key in sorted(msgs_a.keys() - msgs_b.keys()):
+    # --- Message rename detection ---
+    # A message is "renamed" when its DLC + signal-geometry fingerprint matches
+    # across a removed↔added pair with different names (same frame_id already
+    # implies matching — here we handle messages removed from one frame_id and
+    # a structurally-identical new message added at a different frame_id).
+    removed_keys = sorted(msgs_a.keys() - msgs_b.keys())
+    added_keys   = sorted(msgs_b.keys() - msgs_a.keys())
+
+    fp_to_removed_key: dict[tuple, tuple] = {}
+    for key in removed_keys:
+        fp = _msg_fingerprint(msgs_a[key])
+        if fp not in fp_to_removed_key:
+            fp_to_removed_key[fp] = key
+
+    rename_removed_keys: set[tuple] = set()
+    rename_added_keys:   set[tuple] = set()
+
+    for key in added_keys:
+        fp = _msg_fingerprint(msgs_b[key])
+        if fp in fp_to_removed_key:
+            old_key = fp_to_removed_key.pop(fp)
+            rename_removed_keys.add(old_key)
+            rename_added_keys.add(key)
+            ma_r = msgs_a[old_key]
+            mb_a = msgs_b[key]
+            entries.append(DiffEntry(
+                entity="message",
+                kind=RENAME,
+                severity=Severity.METADATA,
+                path=f"message.{ma_r.name}(0x{ma_r.frame_id:X})",
+                value_a=ma_r.name,
+                value_b=mb_a.name,
+                detail=f"renamed {ma_r.name!r} → {mb_a.name!r}",
+                protocol=protocol,
+            ))
+
+    for key in removed_keys:
+        if key in rename_removed_keys:
+            continue
         m = msgs_a[key]
         entries.append(DiffEntry("message", REMOVED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
                                   value_a=m.name, protocol=protocol))
 
-    for key in sorted(msgs_b.keys() - msgs_a.keys()):
+    for key in added_keys:
+        if key in rename_added_keys:
+            continue
         m = msgs_b[key]
         entries.append(DiffEntry("message", ADDED, Severity.FUNCTIONAL,
                                   f"message.{m.name}(0x{m.frame_id:X})",
@@ -388,6 +514,16 @@ def _sig_fingerprint(s) -> tuple:
         s.scale,
         s.offset,
     )
+
+
+def _msg_fingerprint(m) -> tuple:
+    """Return a fingerprint for message rename detection: (dlc, frozenset of signal fingerprints).
+
+    Two messages with identical fingerprints but different names are treated as
+    a *rename* rather than a removal + addition.
+    """
+    sigs_fp = frozenset(_sig_fingerprint(s) for s in m.signals)
+    return (m.length, sigs_fp)
 
 
 def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry]:
