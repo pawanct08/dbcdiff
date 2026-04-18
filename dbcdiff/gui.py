@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 import cantools
 from .engine import (compare_databases, max_severity, Severity, DiffEntry,
                      BAUD_RATES, compute_bus_load)
-from .converter import dbc_to_excel, excel_to_dbc
+from .converter import excel_to_dbc
+from .reporters.excel_reporter import write_excel
 
 # ---------------------------------------------------------------------------
 # Severity display map  (enum name → display_label, bg, fg)
@@ -1210,7 +1211,8 @@ class ConverterWidget(QWidget):
         try:
             if ext == ".dbc":
                 self._log_msg(f"▶  Converting DBC → Excel…\n   Source : {src}\n   Output : {out}")
-                dbc_to_excel(src, out)
+                db = cantools.database.load_file(src)
+                write_excel(db, out)
                 self._log_msg("✅  Conversion complete!")
             elif ext in (".xlsx", ".xls"):
                 self._log_msg(f"▶  Converting Excel → DBC…\n   Source : {src}\n   Output : {out}")
