@@ -1251,8 +1251,9 @@ class ViewerDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_messages_tab(),   "📨  Messages")
         tabs.addTab(self._build_signals_tab(),    "📡  Signals")
-        tabs.addTab(self._build_bit_layout_tab(), "🔢  Bit Layout")
-        tabs.addTab(self._build_nodes_tab(),      "🔗  Nodes")
+        tabs.addTab(self._build_bit_layout_tab(),    "🔢  Bit Layout")
+        tabs.addTab(self._build_nodes_tab(),         "🔗  Nodes")
+        tabs.addTab(self._build_consistency_tab(),   "⚠️  Consistency")
         root.addWidget(tabs, stretch=1)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -1497,6 +1498,273 @@ class ViewerDialog(QDialog):
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 tbl.setItem(row, col, it)
         tbl.resizeColumnsToContents()
+        return w
+
+    # ── Consistency checks ────────────────────────────────────────────────────
+
+    def _build_consistency_tab(self) -> QWidget:  # noqa: PLR0912
+        """Run all 8 automatic consistency checks and render results."""
+
+        # ── Internal data class ───────────────────────────────────────────
+        class Finding:
+            __slots__ = ("sev", "check", "entity", "detail", "hint")
+
+            def __init__(self, sev: str, check: str, entity: str,
+                         detail: str, hint: str) -> None:
+                self.sev    = sev
+                self.check  = check
+                self.entity = entity
+                self.detail = detail
+                self.hint   = hint
+
+        findings: list[Finding] = []
+        db      = self._db
+        KNODES  = {n.name for n in (db.nodes or [])}
+
+        # ── Helper: physical bit positions ────────────────────────────────
+        def _bits_of(s) -> set[int]:
+            start, length = int(s.start), int(s.length)
+            if "little" in str(s.byte_order).lower():       # Intel LE
+                return set(range(start, start + length))
+            # Motorola BE: start = MSB in DBC vector notation;
+            # walk downward in-byte then wrap to MSB of next byte.
+            bits: set[int] = set()
+            cur  = start
+            for _ in range(length):
+                bits.add(cur)
+                cur = (cur // 8 + 1) * 8 + 7 if cur % 8 == 0 else cur - 1
+            return bits
+
+        # ── Check 1: Duplicate frame IDs ──────────────────────────────────
+        seen_ids: dict[int, str] = {}
+        for m in db.messages:
+            if m.frame_id in seen_ids:
+                findings.append(Finding(
+                    "Error", "Duplicate Frame ID",
+                    f"0x{m.frame_id:X}",
+                    f"'{m.name}' and '{seen_ids[m.frame_id]}' share"
+                    f" frame ID 0x{m.frame_id:X}.",
+                    "Assign a unique frame ID to every message.",
+                ))
+            else:
+                seen_ids[m.frame_id] = m.name
+
+        for m in db.messages:
+            dlc_bits = m.length * 8
+            pref     = m.name
+
+            # ── Check 2: Undefined sender ──────────────────────────────────
+            for sender in (m.senders or []):
+                if sender and sender not in KNODES:
+                    findings.append(Finding(
+                        "Warning", "Undefined Sender",
+                        pref,
+                        f"Sender '{sender}' is not listed in BU_.",
+                        "Add the node to the BU_ declaration or correct"
+                        " the sender name.",
+                    ))
+
+            # ── Check 3: Cycle time = 0 ────────────────────────────────────
+            ct = m.cycle_time
+            if ct == 0:
+                findings.append(Finding(
+                    "Error", "Cycle Time = 0",
+                    pref,
+                    f"'{pref}' has GenMsgCycleTime = 0;"
+                    " a cyclic message would fire continuously.",
+                    "Set GenMsgCycleTime to the intended period in ms"
+                    " (e.g. 10 or 100).",
+                ))
+
+            # ── Check 4: Multiplexer switch with no muxed signals ──────────
+            has_mux_sw = any(getattr(s, "is_multiplexer", False)
+                             for s in m.signals)
+            has_muxed  = any(bool(getattr(s, "multiplexer_ids", None))
+                             for s in m.signals)
+            if has_mux_sw and not has_muxed:
+                sw_name = next(
+                    s.name for s in m.signals
+                    if getattr(s, "is_multiplexer", False)
+                )
+                findings.append(Finding(
+                    "Warning", "Mux Without Signals",
+                    pref,
+                    f"Multiplexer switch '{sw_name}' is declared but no"
+                    " signals reference any mux ID.",
+                    "Add multiplexed signals (M0, M1 …) or remove the"
+                    " mux switch.",
+                ))
+
+            # ── Per-signal checks + bit collection ────────────────────────
+            sig_bits: dict[str, set[int]] = {}
+            for s in m.signals:
+                bits = _bits_of(s)
+                sig_bits[s.name] = bits
+
+                # Check 5: Scale = 0
+                try:
+                    if float(s.scale) == 0.0:
+                        findings.append(Finding(
+                            "Warning", "Scale = 0",
+                            f"{pref}.{s.name}",
+                            f"Scale is 0 — physical value will always equal"
+                            f" offset ({s.offset}) regardless of raw data.",
+                            "Set a meaningful scale factor (e.g. 0.001, 0.1, 1.0).",
+                        ))
+                except (TypeError, ValueError):
+                    pass
+
+                # Check 6: No receivers
+                receivers = getattr(s, "receivers", None) or []
+                if not receivers:
+                    findings.append(Finding(
+                        "Info", "No Receivers",
+                        f"{pref}.{s.name}",
+                        "Signal has no receiver nodes; routing is undefined.",
+                        "Add receiving node(s) or use"
+                        " VECTOR__INDEPENDENT_SIG_MSG.",
+                    ))
+                else:
+                    # Check 7: Undefined receiver(s)
+                    for r in receivers:
+                        if r and r not in KNODES:
+                            findings.append(Finding(
+                                "Warning", "Undefined Receiver",
+                                f"{pref}.{s.name}",
+                                f"Receiver '{r}' is not listed in BU_.",
+                                "Add the node to the BU_ declaration or"
+                                " correct the receiver name.",
+                            ))
+
+                # Check 8: DLC undersize
+                if bits:
+                    max_bit = max(bits)
+                    if max_bit >= dlc_bits:
+                        findings.append(Finding(
+                            "Error", "DLC Undersize",
+                            f"{pref}.{s.name}",
+                            f"Signal reaches bit {max_bit} but DLC={m.length}"
+                            f" only covers bits 0\u2013{dlc_bits - 1}.",
+                            f"Increase DLC to at least {max_bit // 8 + 1}"
+                            " bytes.",
+                        ))
+
+            # ── Check 1b: Bit overlap (pairwise) ──────────────────────────
+            snames = list(sig_bits)
+            for i in range(len(snames)):
+                for j in range(i + 1, len(snames)):
+                    overlap = sig_bits[snames[i]] & sig_bits[snames[j]]
+                    if overlap:
+                        ovs = sorted(overlap)
+                        rng = (str(ovs[0]) if len(ovs) == 1
+                               else f"{ovs[0]}\u2013{ovs[-1]}")
+                        findings.append(Finding(
+                            "Error", "Bit Overlap",
+                            pref,
+                            f"'{snames[i]}' and '{snames[j]}' share"
+                            f" {len(ovs)} bit(s) at position(s) {rng}.",
+                            "Correct the start bit or length of one of the"
+                            " conflicting signals.",
+                        ))
+
+        # ── Build UI ───────────────────────────────────────────────────────
+        SEV_ORDER  = {"Error": 0, "Warning": 1, "Info": 2}
+        SEV_COLORS = {
+            "Error":   ("#3d1a1a", "#f85149"),
+            "Warning": ("#3d2e0a", "#e3b341"),
+            "Info":    ("#0d2645", "#58a6ff"),
+        }
+        findings.sort(key=lambda f: SEV_ORDER.get(f.sev, 9))
+
+        n_err  = sum(1 for f in findings if f.sev == "Error")
+        n_warn = sum(1 for f in findings if f.sev == "Warning")
+        n_info = sum(1 for f in findings if f.sev == "Info")
+
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Summary bar
+        summary_row = QHBoxLayout()
+        if not findings:
+            ok_lbl = QLabel("\u2705  No issues found")
+            ok_lbl.setStyleSheet(
+                "background:#1a3d1a; color:#3fb950;"
+                " padding:2px 10px; border-radius:4px; font-weight:600;"
+            )
+            summary_row.addWidget(ok_lbl)
+        else:
+            for label, count, sev_key in [
+                (f"\u26d4  {n_err} Error{'s' if n_err   != 1 else ''}", n_err,  "Error"),
+                (f"\u26a0\ufe0f  {n_warn} Warning{'s' if n_warn != 1 else ''}", n_warn, "Warning"),
+                (f"\u2139\ufe0f  {n_info} Info",                              n_info, "Info"),
+            ]:
+                if count > 0:
+                    lbl = QLabel(label)
+                    bg, fg = SEV_COLORS[sev_key]
+                    lbl.setStyleSheet(
+                        f"background:{bg}; color:{fg};"
+                        " padding:2px 10px; border-radius:4px;"
+                        " font-weight:600; margin-right:4px;"
+                    )
+                    summary_row.addWidget(lbl)
+
+        total_lbl = QLabel(
+            f"  {len(findings)} finding{'s' if len(findings) != 1 else ''} total"
+        )
+        total_lbl.setStyleSheet("color:#8b949e;")
+        summary_row.addWidget(total_lbl)
+        summary_row.addStretch()
+        summary_row.addWidget(QLabel("Filter:"))
+        filter_cb = QComboBox()
+        filter_cb.addItems(["Show all", "Errors only",
+                            "Warnings only", "Info only"])
+        summary_row.addWidget(filter_cb)
+        lay.addLayout(summary_row)
+
+        # Table
+        COLS = ["Severity", "Check", "Entity", "Detail", "Fix Hint"]
+        tbl = QTableWidget(0, len(COLS))
+        tbl.setHorizontalHeaderLabels(COLS)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tbl.setAlternatingRowColors(False)
+        tbl.setSortingEnabled(True)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.setWordWrap(True)
+        lay.addWidget(tbl, stretch=1)
+
+        def _populate(show_filter: str = "Show all") -> None:
+            visible = [
+                f for f in findings
+                if show_filter == "Show all"
+                or (show_filter == "Errors only"   and f.sev == "Error")
+                or (show_filter == "Warnings only" and f.sev == "Warning")
+                or (show_filter == "Info only"     and f.sev == "Info")
+            ]
+            tbl.setSortingEnabled(False)
+            tbl.setRowCount(len(visible))
+            for row, f in enumerate(visible):
+                bg, fg = SEV_COLORS.get(f.sev, ("#21262d", "#c9d1d9"))
+                for col, val in enumerate(
+                    [f.sev, f.check, f.entity, f.detail, f.hint]
+                ):
+                    it = QTableWidgetItem(val)
+                    it.setFlags(
+                        Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+                    )
+                    if col == 0:
+                        it.setBackground(QColor(bg))
+                        it.setForeground(QColor(fg))
+                        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    tbl.setItem(row, col, it)
+            tbl.setSortingEnabled(True)
+            tbl.resizeColumnsToContents()
+            tbl.horizontalHeader().setStretchLastSection(True)
+
+        _populate()
+        filter_cb.currentTextChanged.connect(_populate)
         return w
 
 
