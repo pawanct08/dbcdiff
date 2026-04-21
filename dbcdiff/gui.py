@@ -2597,6 +2597,555 @@ class ThreeSimWidget(QWidget):
         "re-install dbcdiff</h2></body></html>"
     )
 
+    # Embedded verbatim copy of resources/3d_sim.html.
+    # Storing the HTML here eliminates all runtime file I/O and works in
+    # every deployment: editable install, wheel, PyInstaller onefile exe.
+    _THREE_SIM_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAN 3D Bus Simulation</title>
+<!-- Three.js r128 (classic non-module build) + OrbitControls -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:'Consolas',monospace;overflow:hidden}
+#wrap{width:100vw;height:100vh;position:relative}
+canvas{display:block}
+
+/* \u2500\u2500 Toolbar \u2500\u2500 */
+#tb{
+  position:absolute;top:10px;left:10px;right:10px;
+  display:flex;align-items:center;flex-wrap:wrap;gap:10px;
+  background:rgba(22,27,34,.94);border:1px solid #30363d;
+  border-radius:8px;padding:9px 14px;z-index:20;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)
+}
+#tb h2{font-size:13px;color:#58a6ff;white-space:nowrap;margin:0;user-select:none}
+.cg{display:flex;align-items:center;gap:6px;font-size:11px}
+.cg label{color:#8b949e;white-space:nowrap;user-select:none}
+input[type=range]{accent-color:#3b82f6;width:88px;cursor:pointer}
+select{background:#161b22;color:#e6edf3;border:1px solid #30363d;
+       border-radius:4px;padding:2px 5px;font:11px Consolas;cursor:pointer}
+#pbtn{background:#1a7f37;border:1px solid #2ea043;color:#fff;
+      border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;
+      user-select:none;outline:none}
+#pbtn.pau{background:#9a3412;border-color:#c2410c}
+.badge{background:#1f6feb33;border:1px solid #1f6feb;color:#79c0ff;
+       border-radius:4px;padding:2px 7px;font-size:11px;white-space:nowrap}
+#tdisp{color:#58a6ff;font-size:11px;min-width:60px;user-select:none}
+.hint{margin-left:auto;font-size:10px;color:#484f58;white-space:nowrap;user-select:none}
+
+/* \u2500\u2500 Detail panel \u2500\u2500 */
+#dp{
+  position:absolute;right:10px;top:62px;width:264px;
+  max-height:calc(100vh - 80px);overflow-y:auto;
+  background:rgba(22,27,34,.96);border:1px solid #30363d;
+  border-radius:8px;padding:12px;z-index:30;display:none;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#dp h3{font-size:12px;color:#58a6ff;margin-bottom:8px;padding-right:18px;
+        word-break:break-all}
+.dr{display:flex;justify-content:space-between;font-size:11px;
+    padding:3px 0;border-bottom:1px solid #21262d}
+.dr:last-child{border-bottom:none}
+.dl{color:#8b949e;flex-shrink:0;padding-right:6px}
+.dv{color:#e6edf3;font-weight:bold;text-align:right;word-break:break-all}
+#dclose{float:right;cursor:pointer;color:#8b949e;font-size:15px;
+        line-height:1;user-select:none;padding:0 0 2px 4px}
+#dclose:hover{color:#e6edf3}
+.sec{color:#8b949e;font-size:10px;margin:7px 0 3px;text-transform:uppercase;
+     letter-spacing:.05em}
+
+/* \u2500\u2500 Legend \u2500\u2500 */
+#leg{
+  position:absolute;left:10px;bottom:24px;
+  background:rgba(22,27,34,.90);border:1px solid #30363d;
+  border-radius:6px;padding:7px 10px;font-size:11px;z-index:20;
+  user-select:none}
+.li{display:flex;align-items:center;gap:6px;margin:2px 0}
+.ld{width:11px;height:11px;border-radius:2px;flex-shrink:0}
+#leg .sec{margin-bottom:4px}
+
+/* \u2500\u2500 Status bar \u2500\u2500 */
+#sb{
+  position:absolute;bottom:0;left:0;right:0;
+  background:rgba(13,17,23,.95);border-top:1px solid #21262d;
+  padding:3px 10px;font-size:10px;color:#8b949e;z-index:20;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* \u2500\u2500 No-data overlay \u2500\u2500 */
+#nd{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:14px;
+  background:#0d1117;z-index:50;pointer-events:none}
+#nd.hidden{display:none}
+#nd h2{color:#58a6ff;font-size:18px;margin:0}
+#nd p{color:#8b949e;font-size:13px;margin:0;text-align:center;line-height:1.6}
+</style>
+</head>
+<body>
+<div id="wrap">
+
+  <!-- \u2500\u2500 Toolbar \u2500\u2500 -->
+  <div id="tb">
+    <h2>&#x1F5B2; 3D Bus Sim</h2>
+    <span class="badge" id="mc">0 msgs</span>
+
+    <div class="cg">
+      <label>Speed:</label>
+      <input type="range" id="sps" min="1" max="200" value="10">
+      <span id="spv" style="color:#e6edf3;min-width:38px;font-size:11px">10&times;</span>
+    </div>
+
+    <div class="cg">
+      <label>Baud:</label>
+      <input type="range" id="bds" min="100" max="1000" step="100" value="500">
+      <span id="bdv" style="color:#e6edf3;min-width:62px;font-size:11px">500 kbps</span>
+    </div>
+
+    <div class="cg">
+      <label>Window:</label>
+      <select id="wins">
+        <option value="500">500 ms</option>
+        <option value="1000" selected>1 s</option>
+        <option value="2000">2 s</option>
+        <option value="5000">5 s</option>
+        <option value="10000">10 s</option>
+      </select>
+    </div>
+
+    <button id="pbtn">&#9646;&#9646; Pause</button>
+    <span id="tdisp">0.00 s</span>
+    <span class="hint">Drag&#160;=&#160;orbit&#160;&middot;&#160;Scroll&#160;=&#160;zoom&#160;&middot;&#160;Click&#160;=&#160;info</span>
+  </div>
+
+  <!-- \u2500\u2500 Detail panel \u2500\u2500 -->
+  <div id="dp">
+    <span id="dclose" title="Close">&#x2715;</span>
+    <h3 id="dname">&#8212;</h3>
+    <div id="drows"></div>
+  </div>
+
+  <!-- \u2500\u2500 Legend \u2500\u2500 -->
+  <div id="leg">
+    <div class="sec">Severity</div>
+    <div class="li"><div class="ld" style="background:#da3633"></div>Breaking</div>
+    <div class="li"><div class="ld" style="background:#e3b341"></div>Functional</div>
+    <div class="li"><div class="ld" style="background:#2ea043"></div>Added / Missing</div>
+    <div class="li"><div class="ld" style="background:#58a6ff"></div>Metadata</div>
+    <div class="li"><div class="ld" style="background:#3b82f6"></div>Viewer / Unchanged</div>
+  </div>
+
+  <!-- \u2500\u2500 Status bar \u2500\u2500 -->
+  <div id="sb"><span id="stxt">Loading&#8230;</span></div>
+
+  <!-- \u2500\u2500 No-data overlay \u2500\u2500 -->
+  <div id="nd" class="hidden">
+    <div style="font-size:46px">&#x1F5B2;</div>
+    <h2>No DBC data loaded</h2>
+    <p>Run <b>Compare</b> or open a DBC in <b>Visualize</b> mode<br>
+       to populate the 3D bus scene.</p>
+  </div>
+
+</div><!-- #wrap -->
+
+<!-- \u2500\u2500 Injected data \u2500\u2500 -->
+<script>const CAN_DATA = /*INJECT_DATA*/null/*END_INJECT*/;</script>
+
+<!-- \u2500\u2500 Main scene \u2500\u2500 -->
+<script>
+(function () {
+'use strict';
+
+// \u2500\u2500\u2500 Guard: Three.js available? \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+if (typeof THREE === 'undefined') {
+  document.getElementById('stxt').textContent =
+    'THREE.js failed to load \u2014 check network connection.';
+  document.getElementById('nd').classList.remove('hidden');
+  document.getElementById('nd').querySelector('h2').textContent =
+    'THREE.js could not load';
+  document.getElementById('nd').querySelector('p').textContent =
+    'Check your internet connection. Three.js is loaded from CDN.';
+  return;
+}
+
+// \u2500\u2500\u2500 Data \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var data     = (CAN_DATA && typeof CAN_DATA === 'object') ? CAN_DATA
+               : { mode: 'viewer', messages: [] };
+var messages = (data.messages || []).slice(0, 150);   // cap at 150 rows
+var simMode  = data.mode || 'viewer';
+
+document.getElementById('mc').textContent = messages.length + ' msgs';
+
+if (!messages.length) {
+  document.getElementById('nd').classList.remove('hidden');
+  document.getElementById('stxt').textContent = 'No messages \u2014 load a DBC first.';
+  return;
+}
+
+// \u2500\u2500\u2500 Colour helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var SEV_HEX = {
+  breaking:  0xda3633,
+  functional:0xe3b341,
+  added:     0x2ea043,
+  metadata:  0x58a6ff,
+  unchanged: 0x3b82f6,
+};
+var VIEW_PAL = [
+  0x3b82f6, 0x10b981, 0xf59e0b, 0xa855f7,
+  0xef4444, 0x06b6d4, 0xf97316, 0x84cc16,
+  0xec4899, 0x8b5cf6, 0x14b8a6, 0xfbbf24,
+];
+function msgColor(msg, idx) {
+  if (simMode === 'diff' && msg.severity && SEV_HEX[msg.severity] !== undefined) {
+    return SEV_HEX[msg.severity];
+  }
+  return VIEW_PAL[idx % VIEW_PAL.length];
+}
+function brightenHex(hex, f) {
+  var r = Math.min(1, ((hex >> 16 & 0xff) / 255) * f);
+  var g = Math.min(1, ((hex >>  8 & 0xff) / 255) * f);
+  var b = Math.min(1, ((hex       & 0xff) / 255) * f);
+  return new THREE.Color(r, g, b);
+}
+
+// \u2500\u2500\u2500 Renderer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var wrap     = document.getElementById('wrap');
+var renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+renderer.setClearColor(0x0d1117);
+wrap.insertBefore(renderer.domElement, wrap.firstChild);
+
+// \u2500\u2500\u2500 Scene + Camera \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var scene  = new THREE.Scene();
+scene.fog  = new THREE.Fog(0x0d1117, 90, 240);
+
+var camera = new THREE.PerspectiveCamera(
+  50, wrap.clientWidth / wrap.clientHeight, 0.1, 500
+);
+
+// \u2500\u2500\u2500 OrbitControls \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var controls         = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping  = true;
+controls.dampingFactor  = 0.07;
+controls.screenSpacePanning = false;
+
+// \u2500\u2500\u2500 Lighting \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+scene.add(new THREE.AmbientLight(0xffffff, 0.50));
+var dlight = new THREE.DirectionalLight(0xffffff, 0.75);
+dlight.position.set(18, 28, 18);
+scene.add(dlight);
+var dlight2 = new THREE.DirectionalLight(0x8896aa, 0.25);
+dlight2.position.set(-12, -12, -12);
+scene.add(dlight2);
+
+// \u2500\u2500\u2500 Layout constants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var ROW_H   = 1.15;   // Y units between message rows
+var X_LEN   = 42;     // Width of the visible time window (world units)
+var N       = messages.length;
+var sceneH  = N * ROW_H;
+
+// \u2500\u2500\u2500 Grid \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var grid = new THREE.GridHelper(X_LEN * 1.5, 44, 0x161b22, 0x161b22);
+grid.position.set(X_LEN / 2, -0.7, 0);
+scene.add(grid);
+
+// \u2500\u2500\u2500 Axis lines \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function addLine(x0,y0,z0, x1,y1,z1, color) {
+  var geo = new THREE.BufferGeometry();
+  geo.setFromPoints([
+    new THREE.Vector3(x0,y0,z0),
+    new THREE.Vector3(x1,y1,z1)
+  ]);
+  scene.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: color })));
+}
+addLine(-0.5, -0.5, 0,  X_LEN + 1.5, -0.5, 0, 0x58a6ff);  // X-axis (time)
+addLine(-0.5, -0.5, 0,  -0.5, sceneH + 0.5, 0, 0x2ea043);  // Y-axis (msgs)
+
+// \u2500\u2500\u2500 Sprites \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function makeTextSprite(text, fillColor, fontSize) {
+  var c = document.createElement('canvas');
+  c.width = 256; c.height = 64;
+  var ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, 256, 64);
+  ctx.font = (fontSize || 11) + 'px Consolas,monospace';
+  ctx.fillStyle = fillColor || '#8b949e';
+  ctx.fillText(text, 4, 44);
+  var tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  var mat = new THREE.SpriteMaterial({ map: tex, transparent: true,
+                                       depthWrite: false, depthTest: false });
+  return new THREE.Sprite(mat);
+}
+
+// Row labels: frame_id hex
+messages.forEach(function(msg, i) {
+  var sp = makeTextSprite(
+    '0x' + msg.frame_id.toString(16).toUpperCase().padStart(3, '0'),
+    '#484f58', 10
+  );
+  sp.position.set(-3.2, i * ROW_H + ROW_H / 2, 0);
+  sp.scale.set(4.8, 1.2, 1);
+  scene.add(sp);
+});
+
+// X-axis tick labels \u2014 rebuilt when windowMs changes
+var xLabels = [];
+function rebuildXLabels(winMs) {
+  xLabels.forEach(function(s){ scene.remove(s); });
+  xLabels.length = 0;
+  [0, 0.25, 0.5, 0.75, 1.0].forEach(function(f) {
+    var sp = makeTextSprite(Math.round(f * winMs) + 'ms', '#58a6ff', 10);
+    sp.position.set(f * X_LEN, -1.35, 0);
+    sp.scale.set(4, 1, 1);
+    scene.add(sp);
+    xLabels.push(sp);
+  });
+}
+rebuildXLabels(1000);
+
+// \u2500\u2500\u2500 Camera initial position \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var cY = sceneH / 2;
+camera.position.set(X_LEN / 2, cY + Math.max(12, N * 0.6), 30);
+controls.target.set(X_LEN / 2, cY, 0);
+controls.update();
+
+// \u2500\u2500\u2500 Emitters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// One "emitter" per message. Each fires BoxGeometry capsules at cycle_time rate.
+var emitters = messages.map(function(msg, i) {
+  var hex    = msgColor(msg, i);
+  var baseC  = new THREE.Color(hex);
+  var dlc    = Math.max(1, Math.min(8, msg.dlc || 8));
+  var bw     = dlc * 0.30 + 0.40;           // bar width in world units proportional to DLC
+  var bh     = 0.38;
+  var bd     = 0.38;
+  var geo    = new THREE.BoxGeometry(bw, bh, bd);
+  var eGeo   = new THREE.EdgesGeometry(geo);
+
+  var mat    = new THREE.MeshPhongMaterial({
+    color: baseC, emissive: baseC, emissiveIntensity: 0.22,
+    shininess: 80, transparent: true, opacity: 0.88,
+    depthWrite: true,
+  });
+  var eMat   = new THREE.LineBasicMaterial({
+    color: brightenHex(hex, 1.5),
+    transparent: true, opacity: 0.60,
+  });
+
+  return {
+    msg:      msg,
+    yPos:     i * ROW_H + ROW_H / 2,
+    cycleMs:  msg.cycle_time || 0,
+    geo: geo, eGeo: eGeo,
+    mat: mat, eMat: eMat,
+    capsules: [],    // { mesh, birthSimMs }
+    nextFireMs: 0,
+    hex: hex,
+  };
+});
+
+// \u2500\u2500\u2500 Animation state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var simMs    = 0.0;
+var paused   = false;
+var speedMul = 10;
+var windowMs = 1000;
+var lastReal = performance.now();
+var MAX_CAP  = 60;   // max active capsules per emitter
+
+// \u2500\u2500\u2500 Toolbar wiring \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var spsEl = document.getElementById('sps');
+var spvEl = document.getElementById('spv');
+spsEl.addEventListener('input', function() {
+  speedMul = +spsEl.value;
+  spvEl.textContent = speedMul + '\u00d7';
+});
+
+var bdsEl = document.getElementById('bds');
+var bdvEl = document.getElementById('bdv');
+bdsEl.addEventListener('input', function() {
+  var b  = +bdsEl.value;
+  bdvEl.textContent = b + ' kbps';
+  // Cosmetic: adjust base opacity for emitters + all live capsules
+  var baseOp = 0.48 + (b / 1000) * 0.44;
+  emitters.forEach(function(em) {
+    em.mat.opacity = baseOp;
+    em.capsules.forEach(function(c){ c.mesh.material.opacity = baseOp; });
+  });
+});
+
+var winsEl = document.getElementById('wins');
+winsEl.addEventListener('change', function() {
+  windowMs = +winsEl.value;
+  rebuildXLabels(windowMs);
+  // Reset nextFireMs
+  emitters.forEach(function(em){ em.nextFireMs = simMs; });
+});
+
+var pbtn = document.getElementById('pbtn');
+pbtn.addEventListener('click', function() {
+  paused = !paused;
+  pbtn.innerHTML  = paused ? '&#9654; Play' : '&#9646;&#9646; Pause';
+  pbtn.className  = paused ? 'pau' : '';
+  if (!paused) lastReal = performance.now();
+});
+
+// \u2500\u2500\u2500 Raycaster / click detection \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var ray   = new THREE.Raycaster();
+var mouse = new THREE.Vector2();
+renderer.domElement.addEventListener('click', function(ev) {
+  var r   = renderer.domElement.getBoundingClientRect();
+  mouse.x =  ((ev.clientX - r.left) / r.width)  * 2 - 1;
+  mouse.y = -((ev.clientY - r.top)  / r.height) * 2 + 1;
+  ray.setFromCamera(mouse, camera);
+
+  var meshToEm = new Map();
+  emitters.forEach(function(em) {
+    em.capsules.forEach(function(c){ meshToEm.set(c.mesh, em); });
+  });
+
+  var hits = ray.intersectObjects(Array.from(meshToEm.keys()), false);
+  if (hits.length) {
+    var em = meshToEm.get(hits[0].object);
+    if (em) showDetail(em.msg);
+  }
+}, false);
+
+// \u2500\u2500\u2500 Detail panel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function showDetail(msg) {
+  // Pause on click
+  if (!paused) {
+    paused = true;
+    pbtn.innerHTML = '&#9654; Play';
+    pbtn.className = 'pau';
+  }
+  document.getElementById('dname').textContent = msg.name;
+  var rows = [
+    ['Frame ID',  '0x' + msg.frame_id.toString(16).toUpperCase().padStart(3,'0')],
+    ['DLC',       msg.dlc + ' bytes'],
+    ['Cycle',     msg.cycle_time ? msg.cycle_time + ' ms' : '\u2014'],
+    ['Senders',   (msg.senders || []).join(', ') || '\u2014'],
+    ['Signals',   '' + (msg.signal_count || 0)],
+  ];
+  if (msg.severity) {
+    rows.push(['Severity', msg.severity]);
+  }
+  if (msg.comment) {
+    rows.push(['Comment',  msg.comment]);
+  }
+  var html = rows.map(function(r) {
+    return '<div class="dr">'
+         + '<span class="dl">' + r[0] + '</span>'
+         + '<span class="dv">' + escHtml(r[1]) + '</span></div>';
+  }).join('');
+  if (msg.signals && msg.signals.length) {
+    html += '<div class="sec">Signals</div>';
+    msg.signals.forEach(function(s) {
+      html += '<div class="dr">'
+            + '<span class="dl">' + escHtml(s.name) + '</span>'
+            + '<span class="dv" style="font-size:10px">'
+            + s.start_bit + ':' + s.length + 'b'
+            + (s.is_signed ? ' S' : ' U') + '</span></div>';
+    });
+  }
+  document.getElementById('drows').innerHTML = html;
+  document.getElementById('dp').style.display = 'block';
+}
+
+document.getElementById('dclose').addEventListener('click', function() {
+  document.getElementById('dp').style.display = 'none';
+}, false);
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+// \u2500\u2500\u2500 Main animation loop \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function animate() {
+  requestAnimationFrame(animate);
+
+  if (!paused) {
+    var now   = performance.now();
+    var dtR   = Math.min(now - lastReal, 100);  // clamp to 100ms to avoid jumps
+    lastReal  = now;
+    var dtSim = dtR * speedMul;
+    simMs    += dtSim;
+
+    document.getElementById('tdisp').textContent = (simMs / 1000).toFixed(2) + ' s';
+
+    var totalActive = 0;
+    emitters.forEach(function(em) {
+      if (!em.cycleMs) return;  // skip non-cyclic (cycle_time == 0)
+
+      // Fire new capsule(s)
+      while (em.capsules.length < MAX_CAP && simMs >= em.nextFireMs) {
+        var cMat = em.mat.clone();              // per-capsule material for opacity
+        var mesh = new THREE.Mesh(em.geo, cMat);
+        mesh.add(new THREE.LineSegments(em.eGeo, em.eMat));
+        scene.add(mesh);
+        em.capsules.push({ mesh: mesh, mat: cMat, birthMs: em.nextFireMs });
+        em.nextFireMs += em.cycleMs;
+      }
+      // If sim jumped ahead skip to current
+      if (simMs > em.nextFireMs + em.cycleMs * 2) {
+        em.nextFireMs = simMs;
+      }
+
+      // Advance positions and remove stale capsules
+      var alive = [];
+      for (var k = 0; k < em.capsules.length; k++) {
+        var cap = em.capsules[k];
+        var age = simMs - cap.birthMs;
+        if (age > windowMs * 1.05) {
+          scene.remove(cap.mesh);
+          cap.mat.dispose();
+          continue;
+        }
+        var xf = (age / windowMs) * X_LEN;
+        // Fade out in last 20% of window
+        var t  = age / windowMs;
+        cap.mat.opacity = t > 0.80 ? Math.max(0, (1 - t) / 0.20 * 0.88) : 0.88;
+        cap.mesh.position.set(xf, em.yPos, 0);
+        alive.push(cap);
+        totalActive++;
+      }
+      em.capsules = alive;
+    });
+
+    document.getElementById('stxt').textContent =
+      'Sim: ' + (simMs / 1000).toFixed(2) +
+      's  |  Active capsules: ' + totalActive +
+      '  |  Drag to orbit  \u00b7  Click a box for details';
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// \u2500\u2500\u2500 Resize \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+window.addEventListener('resize', function() {
+  var w = wrap.clientWidth, h = wrap.clientHeight;
+  camera.aspect = w / h;;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}, false);
+
+// \u2500\u2500\u2500 Start \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+document.getElementById('stxt').textContent =
+  'Loaded ' + messages.length + ' messages  \u2014  animation running.';
+animate();
+
+}()); // end IIFE
+</script>
+</body>
+</html>"""
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._db               = None
@@ -2687,30 +3236,9 @@ class ThreeSimWidget(QWidget):
 
     @staticmethod
     def _get_template() -> str:
-        import sys as _sys
-
-        # 1. File-adjacent dir — works for dev installs and installed wheels.
-        p = Path(__file__).parent / "resources" / "3d_sim.html"
-        if p.exists():
-            return p.read_text(encoding="utf-8")
-
-        # 2. PyInstaller onefile: bundle is extracted to sys._MEIPASS.
-        #    --add-data=dbcdiff:dbcdiff puts everything under _MEIPASS/dbcdiff/
-        if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
-            p2 = Path(_sys._MEIPASS) / "dbcdiff" / "resources" / "3d_sim.html"
-            if p2.exists():
-                return p2.read_text(encoding="utf-8")
-
-        # 3. importlib.resources — works for any importable package,
-        #    including zip-based imports and editable installs.
-        try:
-            import importlib.resources as _ir
-            ref = _ir.files("dbcdiff") / "resources" / "3d_sim.html"
-            return ref.read_text(encoding="utf-8")
-        except Exception:
-            pass
-
-        return ThreeSimWidget._FALLBACK_HTML
+        # HTML is embedded as _THREE_SIM_HTML — no file I/O, works in all
+        # environments: dev install, wheel, PyInstaller onefile exe.
+        return ThreeSimWidget._THREE_SIM_HTML
 
     @staticmethod
     def _idle_html() -> str:
