@@ -2686,9 +2686,29 @@ class ThreeSimWidget(QWidget):
 
     @staticmethod
     def _get_template() -> str:
+        import sys as _sys
+
+        # 1. File-adjacent dir — works for dev installs and installed wheels.
         p = Path(__file__).parent / "resources" / "3d_sim.html"
         if p.exists():
             return p.read_text(encoding="utf-8")
+
+        # 2. PyInstaller onefile: bundle is extracted to sys._MEIPASS.
+        #    --add-data=dbcdiff:dbcdiff puts everything under _MEIPASS/dbcdiff/
+        if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
+            p2 = Path(_sys._MEIPASS) / "dbcdiff" / "resources" / "3d_sim.html"
+            if p2.exists():
+                return p2.read_text(encoding="utf-8")
+
+        # 3. importlib.resources — works for any importable package,
+        #    including zip-based imports and editable installs.
+        try:
+            import importlib.resources as _ir
+            ref = _ir.files("dbcdiff") / "resources" / "3d_sim.html"
+            return ref.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
         return ThreeSimWidget._FALLBACK_HTML
 
     @staticmethod

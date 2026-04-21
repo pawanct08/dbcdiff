@@ -44,7 +44,8 @@ Changelog   = "https://github.com/pawanct08/dbcdiff/releases"
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["dbcdiff*"]
 
 [tool.setuptools.package-data]
 "dbcdiff" = ["resources/*"]
-include = ["dbcdiff*"]
+"dbcdiff.resources" = ["*"]
