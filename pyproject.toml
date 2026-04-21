@@ -29,8 +29,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov"]
-gui = ["PySide6>=6.5"]
+dev   = ["pytest>=7", "pytest-cov"]
+gui   = ["PySide6>=6.5"]
+3d-sim = ["PySide6-WebEngine>=6.5"]
 
 [project.scripts]
 dbcdiff = "dbcdiff.cli:main"
@@ -43,4 +44,7 @@ Changelog   = "https://github.com/pawanct08/dbcdiff/releases"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools.package-data]
+"dbcdiff" = ["resources/*"]
 include = ["dbcdiff*"]

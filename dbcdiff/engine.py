@@ -8,14 +8,11 @@ File-A / File-B terminology is used throughout (no "old" / "new").
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Optional
 
-from dbcdiff.protocol import (
-    CANProtocol, detect_protocol,
-    extract_j1939_pgn, extract_j1939_sa, extract_j1939_priority,
-)
+from dbcdiff.protocol import classify_message
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -50,6 +47,7 @@ class DiffEntry:
     value_b:  Any = None                # value in File B
     detail:   str = ""
     protocol: str = ""                  # detected protocol label
+    msg_type: str = ""                  # CAN message subtype label
 
     def as_dict(self) -> dict:
         return {
@@ -61,6 +59,27 @@ class DiffEntry:
             "value_b":  _jsonable(self.value_b),
             "detail":   self.detail,
             "protocol": self.protocol,
+            "msg_type": self.msg_type,
+        }
+
+
+@dataclass
+class ConsistencyIssue:
+    level: str
+    rule_id: str
+    message_name: str = ""
+    signal_name: str = ""
+    description: str = ""
+    fix_hint: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "level": self.level,
+            "rule_id": self.rule_id,
+            "message_name": self.message_name,
+            "signal_name": self.signal_name,
+            "description": self.description,
+            "fix_hint": self.fix_hint,
         }
 
 
@@ -98,6 +117,185 @@ def _sig_key(s) -> str:
     return s.name
 
 
+def _motorola_start_bit(signal) -> int:
+    try:
+        import cantools
+
+        return int(cantools.database.can.signal.start_bit(signal))
+    except Exception:
+        return int(signal.start)
+
+
+def _signal_bit_positions(signal) -> set[int]:
+    if getattr(signal, "byte_order", "little_endian") == "big_endian":
+        start_bit = _motorola_start_bit(signal)
+        return set(range(start_bit, start_bit + int(signal.length)))
+    return set(range(int(signal.start), int(signal.start) + int(signal.length)))
+
+
+def _message_attribute_value(message, attr_name: str, fallback: Any = None) -> Any:
+    attributes = _dbc_attr_dict(message)
+    if attr_name in attributes:
+        return attributes[attr_name]
+    return fallback
+
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_cycle_time(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _consistency_rank(level: str) -> int:
+    return {"ERROR": 0, "WARNING": 1, "INFO": 2}.get(level, 3)
+
+
+def max_consistency_level(issues: list[ConsistencyIssue]) -> Optional[str]:
+    if not issues:
+        return None
+    return min(issues, key=lambda issue: _consistency_rank(issue.level)).level
+
+
+def check_consistency(db) -> list[ConsistencyIssue]:
+    issues: list[ConsistencyIssue] = []
+    node_names = {node.name for node in (db.nodes or [])}
+    messages = list(getattr(db, "messages", []) or [])
+
+    frame_id_map: dict[int, list[object]] = {}
+    for message in messages:
+        frame_id_map.setdefault(int(message.frame_id), []).append(message)
+
+    for frame_id, duplicates in sorted(frame_id_map.items()):
+        if len(duplicates) < 2:
+            continue
+        duplicate_names = sorted(message.name for message in duplicates)
+        for message in duplicates:
+            peer_names = [name for name in duplicate_names if name != message.name]
+            issues.append(ConsistencyIssue(
+                level="ERROR",
+                rule_id="CAN-C03",
+                message_name=message.name,
+                description=(
+                    f"Frame ID 0x{frame_id:X} is shared with {', '.join(peer_names) or message.name}."
+                ),
+                fix_hint="Assign a unique frame ID to each message in the database.",
+            ))
+
+    for message in sorted(messages, key=lambda current: (int(current.frame_id), current.name)):
+        senders = list(getattr(message, "senders", None) or [])
+        for sender_name in senders:
+            if sender_name not in node_names:
+                issues.append(ConsistencyIssue(
+                    level="WARNING",
+                    rule_id="CAN-C04",
+                    message_name=message.name,
+                    description=f"Sender '{sender_name}' is not defined in BU_.",
+                    fix_hint="Add the sender node to BU_ or update the message sender list.",
+                ))
+
+        send_type = _normalize_text(_message_attribute_value(message, "GenMsgSendType", getattr(message, "send_type", None)))
+        cycle_time = _normalize_cycle_time(_message_attribute_value(message, "GenMsgCycleTime", getattr(message, "cycle_time", None)))
+        if send_type.lower() == "cyclic" and cycle_time == 0:
+            issues.append(ConsistencyIssue(
+                level="ERROR",
+                rule_id="CAN-C06",
+                message_name=message.name,
+                description="GenMsgSendType is Cyclic but GenMsgCycleTime is 0.",
+                fix_hint="Set a positive cycle time for cyclic messages.",
+            ))
+
+        claimed_bits: dict[int, object] = {}
+        max_claimed_bit = -1
+
+        for signal in sorted(message.signals, key=lambda current: current.name):
+            signal_bits = _signal_bit_positions(signal)
+            if signal_bits:
+                max_claimed_bit = max(max_claimed_bit, max(signal_bits))
+
+            overlap_bits: set[int] = set()
+            overlap_signals: set[str] = set()
+            for bit_index in sorted(signal_bits):
+                previous_signal = claimed_bits.get(bit_index)
+                if previous_signal is not None:
+                    overlap_bits.add(bit_index)
+                    overlap_signals.add(previous_signal.name)
+                else:
+                    claimed_bits[bit_index] = signal
+            if overlap_bits and overlap_signals:
+                issues.append(ConsistencyIssue(
+                    level="ERROR",
+                    rule_id="CAN-C01",
+                    message_name=message.name,
+                    signal_name=signal.name,
+                    description=(
+                        f"Signal overlaps bits {', '.join(str(bit) for bit in sorted(overlap_bits))} "
+                        f"with {', '.join(sorted(overlap_signals))}."
+                    ),
+                    fix_hint="Adjust start bit or length so each signal owns a unique bit range.",
+                ))
+
+            if getattr(signal, "scale", None) == 0:
+                issues.append(ConsistencyIssue(
+                    level="WARNING",
+                    rule_id="CAN-C05",
+                    message_name=message.name,
+                    signal_name=signal.name,
+                    description="Signal scale is 0, so the physical value is constant.",
+                    fix_hint="Use a non-zero scale unless the signal is intentionally constant.",
+                ))
+
+            if getattr(signal, "choices", None) == {}:
+                issues.append(ConsistencyIssue(
+                    level="INFO",
+                    rule_id="CAN-C07",
+                    message_name=message.name,
+                    signal_name=signal.name,
+                    description="Signal defines an empty value table.",
+                    fix_hint="Remove the empty value table or populate it with valid choices.",
+                ))
+
+            if len(signal.name) > 32:
+                issues.append(ConsistencyIssue(
+                    level="WARNING",
+                    rule_id="CAN-C08",
+                    message_name=message.name,
+                    signal_name=signal.name,
+                    description="Signal name exceeds 32 characters and may be truncated by CANdb++.",
+                    fix_hint="Shorten the signal name to 32 characters or fewer.",
+                ))
+
+        dlc_bit_count = int(message.length) * 8
+        if max_claimed_bit >= dlc_bit_count:
+            issues.append(ConsistencyIssue(
+                level="ERROR",
+                rule_id="CAN-C02",
+                message_name=message.name,
+                description=(
+                    f"Highest claimed bit is {max_claimed_bit}, but DLC {message.length} only provides {dlc_bit_count} bits."
+                ),
+                fix_hint="Increase DLC or reduce the signal bit ranges so all bits fit inside the frame.",
+            ))
+
+    issues.sort(
+        key=lambda issue: (
+            _consistency_rank(issue.level),
+            issue.rule_id,
+            issue.message_name,
+            issue.signal_name,
+        )
+    )
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Field maps (lambda getters)
 # ---------------------------------------------------------------------------
@@ -106,7 +304,6 @@ _MSG_BREAKING = {
     "frame_id":          lambda m: m.frame_id,
     "dlc":               lambda m: m.length,         # cantools uses .length
     "is_extended_frame": lambda m: m.is_extended_frame,
-    "is_fd":             lambda m: m.is_fd,
 }
 
 _MSG_FUNCTIONAL = {
@@ -173,40 +370,6 @@ def _compare_fields(entity: str, path_prefix: str, obj_a, obj_b,
                     protocol=protocol,
                 ))
     return entries
-
-
-# ---------------------------------------------------------------------------
-# J1939 specialised diff
-# ---------------------------------------------------------------------------
-
-def _diff_j1939_fields(ma, mb, msg_name: str, protocol: str,
-                        out: list[DiffEntry]) -> None:
-    """Compare J1939 decoded fields (PGN, SA, Priority) for 29-bit messages."""
-    if not (getattr(ma, "is_extended_frame", False) and
-            getattr(mb, "is_extended_frame", False)):
-        return
-
-    checks = [
-        ("pgn",      extract_j1939_pgn,      Severity.BREAKING),
-        ("sa",       extract_j1939_sa,        Severity.FUNCTIONAL),
-        ("priority", extract_j1939_priority,   Severity.METADATA),
-    ]
-    for field_name, extractor, severity in checks:
-        try:
-            va = extractor(ma.frame_id)
-            vb = extractor(mb.frame_id)
-        except Exception:
-            continue
-        if va != vb:
-            out.append(DiffEntry(
-                entity="j1939",
-                kind=CHANGED,
-                severity=severity,
-                path=f"message.{msg_name}.{field_name}",
-                value_a=va,
-                value_b=vb,
-                protocol=protocol,
-            ))
 
 
 # ---------------------------------------------------------------------------
@@ -316,31 +479,12 @@ def compare_databases(db_a, db_b,
     """
     entries: list[DiffEntry] = []
 
-    proto_a = detect_protocol(db_a)
-    proto_b = detect_protocol(db_b)
-
-    # Report protocol mismatch as a functional difference
-    if proto_a != proto_b:
-        entries.append(DiffEntry(
-            entity="database",
-            kind=CHANGED,
-            severity=Severity.FUNCTIONAL,
-            path="db.protocol",
-            value_a=proto_a.value,
-            value_b=proto_b.value,
-            detail=f"{path_a} uses {proto_a.value}, {path_b} uses {proto_b.value}",
-            protocol=f"{proto_a.value} / {proto_b.value}",
-        ))
-
-    # Use File-A protocol label for individual entries (dominant file)
-    proto_label = proto_a.value
-
-    entries.extend(_diff_nodes(db_a, db_b, proto_label))
-    entries.extend(_diff_messages(db_a, db_b, proto_label, baud_rate=baud_rate))
+    entries.extend(_diff_nodes(db_a, db_b))
+    entries.extend(_diff_messages(db_a, db_b, baud_rate=baud_rate))
     entries.extend(_diff_db_attributes(db_a, db_b))
     entries.extend(_diff_envvars(db_a, db_b))
 
-    entries = _resolve_cross_message_signal_renames(entries, db_a, db_b, proto_label)
+    entries = _resolve_cross_message_signal_renames(entries, db_a, db_b, "")
     entries = _expand_choices_diff(entries)
     entries.sort(key=lambda e: -e.severity)
     return entries
@@ -354,6 +498,26 @@ def diff_databases(db_old, db_new) -> list[DiffEntry]:
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
+
+def _node_tx_map(db) -> dict[str, list[str]]:
+    """Return {node_name: sorted list of message names that node transmits}."""
+    tx: dict[str, list[str]] = {}
+    for msg in db.messages:
+        for sender in (msg.senders or []):
+            tx.setdefault(sender, []).append(msg.name)
+    return {k: sorted(v) for k, v in tx.items()}
+
+
+def _node_rx_map(db) -> dict[str, list[str]]:
+    """Return {node_name: sorted list of message names that node receives
+    (i.e. has at least one signal whose receivers list includes that node)}."""
+    rx: dict[str, set[str]] = {}
+    for msg in db.messages:
+        for sig in msg.signals:
+            for rcv in (sig.receivers or []):
+                rx.setdefault(rcv, set()).add(msg.name)
+    return {k: sorted(v) for k, v in rx.items()}
+
 
 def _diff_nodes(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
     entries: list[DiffEntry] = []
@@ -370,6 +534,12 @@ def _diff_nodes(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
                                   f"node.{name}", value_b=name,
                                   protocol=protocol))
 
+    # Build TX/RX maps once for the whole DB (more efficient than per-node)
+    tx_a = _node_tx_map(db_a)
+    tx_b = _node_tx_map(db_b)
+    rx_a = _node_rx_map(db_a)
+    rx_b = _node_rx_map(db_b)
+
     for name in sorted(nodes_a.keys() & nodes_b.keys()):
         na, nb = nodes_a[name], nodes_b[name]
         if na.comment != nb.comment:
@@ -377,6 +547,46 @@ def _diff_nodes(db_a, db_b, protocol: str = "") -> list[DiffEntry]:
                                       f"node.{name}.comment",
                                       value_a=na.comment, value_b=nb.comment,
                                       protocol=protocol))
+
+        # TX message list diff
+        tx_list_a = tx_a.get(name, [])
+        tx_list_b = tx_b.get(name, [])
+        if tx_list_a != tx_list_b:
+            tx_set_a = set(tx_list_a)
+            tx_set_b = set(tx_list_b)
+            for msg_name in sorted(tx_set_a - tx_set_b):
+                entries.append(DiffEntry("node", REMOVED, Severity.FUNCTIONAL,
+                                          f"node.{name}.tx",
+                                          value_a=msg_name,
+                                          detail=f"Node no longer transmits '{msg_name}'",
+                                          protocol=protocol))
+            for msg_name in sorted(tx_set_b - tx_set_a):
+                entries.append(DiffEntry("node", ADDED, Severity.FUNCTIONAL,
+                                          f"node.{name}.tx",
+                                          value_b=msg_name,
+                                          detail=f"Node now transmits '{msg_name}'",
+                                          protocol=protocol))
+
+        # RX message list diff (at message granularity — a node receives a
+        # *message* when it is listed as receiver on at least one of its signals)
+        rx_list_a = rx_a.get(name, [])
+        rx_list_b = rx_b.get(name, [])
+        if rx_list_a != rx_list_b:
+            rx_set_a = set(rx_list_a)
+            rx_set_b = set(rx_list_b)
+            for msg_name in sorted(rx_set_a - rx_set_b):
+                entries.append(DiffEntry("node", REMOVED, Severity.FUNCTIONAL,
+                                          f"node.{name}.rx",
+                                          value_a=msg_name,
+                                          detail=f"Node no longer receives from '{msg_name}'",
+                                          protocol=protocol))
+            for msg_name in sorted(rx_set_b - rx_set_a):
+                entries.append(DiffEntry("node", ADDED, Severity.FUNCTIONAL,
+                                          f"node.{name}.rx",
+                                          value_b=msg_name,
+                                          detail=f"Node now receives from '{msg_name}'",
+                                          protocol=protocol))
+
         entries.extend(_diff_attributes("node", f"node.{name}",
                                          _dbc_attr_dict(na),
                                          _dbc_attr_dict(nb),
@@ -413,11 +623,16 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
     for key in added_keys:
         fp = _msg_fingerprint(msgs_b[key])
         if fp in fp_to_removed_key:
-            old_key = fp_to_removed_key.pop(fp)
-            rename_removed_keys.add(old_key)
-            rename_added_keys.add(key)
+            old_key = fp_to_removed_key[fp]   # peek – don't pop until we confirm a rename
             ma_r = msgs_a[old_key]
             mb_a = msgs_b[key]
+            if ma_r.name == mb_a.name:
+                # Same name, different frame_id → NOT a rename; leave as REMOVED + ADDED
+                # (changing frame_id is a breaking structural change, not a rename).
+                continue
+            fp_to_removed_key.pop(fp)          # consume slot only when names actually differ
+            rename_removed_keys.add(old_key)
+            rename_added_keys.add(key)
             entries.append(DiffEntry(
                 entity="message",
                 kind=RENAME,
@@ -427,6 +642,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
                 value_b=mb_a.name,
                 detail=f"renamed {ma_r.name!r} → {mb_a.name!r}",
                 protocol=protocol,
+                msg_type=classify_message(mb_a),
             ))
 
     for key in removed_keys:
@@ -435,15 +651,17 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
         m = msgs_a[key]
         entries.append(DiffEntry("message", REMOVED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
-                                  value_a=m.name, protocol=protocol))
+                                  value_a=m.name, protocol=protocol,
+                                  msg_type=classify_message(m)))
 
     for key in added_keys:
         if key in rename_added_keys:
             continue
         m = msgs_b[key]
-        entries.append(DiffEntry("message", ADDED, Severity.FUNCTIONAL,
+        entries.append(DiffEntry("message", ADDED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
-                                  value_b=m.name, protocol=protocol))
+                                  value_b=m.name, protocol=protocol,
+                                  msg_type=classify_message(m)))
 
     for key in sorted(msgs_a.keys() & msgs_b.keys()):
         ma, mb = msgs_a[key], msgs_b[key]
@@ -459,6 +677,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
             protocol=protocol,
         )
         for _ent in msg_fields:
+            _ent.msg_type = classify_message(mb)
             if (_ent.kind == CHANGED
                     and _ent.path == f"{prefix}.cycle_time"
                     and _ent.value_a and _ent.value_b):
@@ -476,9 +695,6 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
                 except (TypeError, ZeroDivisionError, ValueError):
                     pass
         entries.extend(msg_fields)
-
-        # J1939 extended decode
-        _diff_j1939_fields(ma, mb, ma.name, protocol, entries)
 
         entries.extend(_diff_attributes(
             "attribute", prefix,
@@ -572,12 +788,7 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
     for name in removed_names:
         if name in renamed_removed:
             continue
-        sev = (
-            Severity.BREAKING
-            if _signals_overlap(sigs_a[name], sigs_b.values())
-            else Severity.FUNCTIONAL
-        )
-        entries.append(DiffEntry("signal", REMOVED, sev,
+        entries.append(DiffEntry("signal", REMOVED, Severity.BREAKING,
                                   f"{msg_prefix}.{name}", value_a=name,
                                   protocol=protocol))
 
@@ -585,7 +796,7 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
     for name in added_names:
         if name in renamed_added:
             continue
-        entries.append(DiffEntry("signal", ADDED, Severity.FUNCTIONAL,
+        entries.append(DiffEntry("signal", ADDED, Severity.BREAKING,
                                   f"{msg_prefix}.{name}", value_b=name,
                                   protocol=protocol))
 
@@ -593,7 +804,7 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
         sa, sb = sigs_a[name], sigs_b[name]
         prefix = f"{msg_prefix}.{name}"
 
-        entries.extend(_compare_fields(
+        sig_diffs = _compare_fields(
             "signal", prefix, sa, sb,
             [
                 (_SIG_BREAKING,    Severity.BREAKING),
@@ -601,7 +812,35 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
                 (_SIG_METADATA,    Severity.METADATA),
             ],
             protocol=protocol,
-        ))
+        )
+
+        # Phase 7 – Upgrade FUNCTIONAL → BREAKING when physical range changes >10 %
+        _old_min = getattr(sa, "minimum", None)
+        _old_max = getattr(sa, "maximum", None)
+        _new_min = getattr(sb, "minimum", None)
+        _new_max = getattr(sb, "maximum", None)
+        if (
+            _old_min is not None and _old_max is not None
+            and _new_min is not None and _new_max is not None
+        ):
+            _old_range = float(_old_max) - float(_old_min)
+            _new_range = float(_new_max) - float(_new_min)
+            _denom = max(abs(_old_range), 1e-9)
+            if _old_range != 0 and abs(_old_range - _new_range) / _denom > 0.10:
+                _detail = (
+                    f"Physical range changed: [{_old_min}, {_old_max}] -> "
+                    f"[{_new_min}, {_new_max}] - consumers may receive "
+                    "out-of-range values"
+                )
+                for _e in sig_diffs:
+                    if _e.severity == Severity.FUNCTIONAL and any(
+                        _e.path.endswith(f) for f in
+                        (".scale", ".offset", ".minimum", ".maximum")
+                    ):
+                        _e.severity = Severity.BREAKING
+                        _e.detail = _detail
+
+        entries.extend(sig_diffs)
 
         entries.extend(_diff_attributes(
             "attribute", prefix,
@@ -617,22 +856,31 @@ def _diff_signals(msg_prefix: str, ma, mb, protocol: str = "") -> list[DiffEntry
 # Attribute helper
 # ---------------------------------------------------------------------------
 
+# BA_ attribute keys whose change is operationally significant (FUNCTIONAL),
+# not merely cosmetic / documentation-level (METADATA).
+_BA_FUNCTIONAL_KEYS: frozenset[str] = frozenset({
+    "GenMsgStartDelayTime",   # first-frame delay affects timing
+    "GenSigSendType",         # event vs cyclic changes transmission behaviour
+})
+
+
 def _diff_attributes(entity: str, path_prefix: str,
                       attrs_a: dict, attrs_b: dict,
                       protocol: str = "") -> list[DiffEntry]:
     entries: list[DiffEntry] = []
     all_keys = sorted(attrs_a.keys() | attrs_b.keys())
     for k in all_keys:
+        sev = Severity.FUNCTIONAL if k in _BA_FUNCTIONAL_KEYS else Severity.METADATA
         if k not in attrs_a:
-            entries.append(DiffEntry(entity, ADDED, Severity.METADATA,
+            entries.append(DiffEntry(entity, ADDED, sev,
                                       f"{path_prefix}[{k}]",
                                       value_b=attrs_b[k], protocol=protocol))
         elif k not in attrs_b:
-            entries.append(DiffEntry(entity, REMOVED, Severity.METADATA,
+            entries.append(DiffEntry(entity, REMOVED, sev,
                                       f"{path_prefix}[{k}]",
                                       value_a=attrs_a[k], protocol=protocol))
         elif attrs_a[k] != attrs_b[k]:
-            entries.append(DiffEntry(entity, CHANGED, Severity.METADATA,
+            entries.append(DiffEntry(entity, CHANGED, sev,
                                       f"{path_prefix}[{k}]",
                                       value_a=attrs_a[k],
                                       value_b=attrs_b[k],
@@ -777,7 +1025,6 @@ BAUD_RATES: dict[str, int] = {
     "250k":  250_000,
     "500k":  500_000,
     "1M":  1_000_000,
-    "2M":  2_000_000,   # CAN FD
 }
 
 
@@ -786,15 +1033,15 @@ def compute_bus_load(db, baud_rate: int) -> list[dict]:
 
     Skips messages with no cycle time (periodic load cannot be estimated).
 
-    Frame-bit count uses standard CAN overhead formulas:
-      * Standard (11-bit ID):  47 bits + 8×DLC
-      * Extended / FD (29-bit): 67 bits + 8×DLC
+        Frame-bit count uses standard CAN overhead formulas:
+            * Standard (11-bit ID): 47 bits + 8×DLC
+            * Extended (29-bit ID): 67 bits + 8×DLC
     """
     results: list[dict] = []
     for m in db.messages:
         if not m.cycle_time or m.cycle_time <= 0:
             continue  # aperiodic / event-triggered — skip
-        is_ext = m.is_extended_frame or getattr(m, "is_fd", False)
+        is_ext = m.is_extended_frame
         overhead = 67 if is_ext else 47
         frame_bits = overhead + 8 * m.length
         cycle_s = m.cycle_time / 1000.0               # ms → s

@@ -9,35 +9,57 @@ from typing import Optional
 
 from PySide6.QtCore import (
     Qt, QThread, Signal, QObject, QMimeData, QSize, QRect, QPoint,
+    QRectF, QPointF, QTimer,
 )
 from PySide6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent, QPalette,
-    QFont, QIcon, QPainter, QPen, QBrush,
+    QFont, QIcon, QPainter, QPen, QBrush, QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame,
+    QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QProgressBar, QSplitter, QStackedWidget, QStatusBar, QTableWidget,
+    QProgressBar, QSlider, QSplitter, QStackedWidget, QStatusBar, QTableWidget,
     QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
     QToolTip,
+    QGraphicsScene, QGraphicsView, QGraphicsRectItem,
 )
 
+# Optional: PySide6-WebEngine for 3-D simulation (pip install PySide6-WebEngine)
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView  # type: ignore[import]
+    _WEB_ENGINE_OK = True
+except ImportError:
+    _QWebEngineView = None   # type: ignore[assignment, misc]
+    _WEB_ENGINE_OK  = False
+
 import cantools
-from .engine import (compare_databases, max_severity, Severity, DiffEntry,
-                     BAUD_RATES, compute_bus_load)
+from . import __version__
+from .engine import (
+    compare_databases,
+    max_severity,
+    Severity,
+    DiffEntry,
+    check_consistency,
+    BAUD_RATES,
+    compute_bus_load,
+)
 from .converter import excel_to_dbc
+from .reporters.csv_reporter import write_csv
 from .reporters.excel_reporter import write_excel
+from .reporters.html_reporter import write_html
+from .reporters.json_reporter import write_json
 
 # ---------------------------------------------------------------------------
 # Severity display map  (enum name → display_label, bg, fg)
 # ---------------------------------------------------------------------------
 _SEV_MAP: dict[str, tuple[str, str, str]] = {
-    "BREAKING":   ("Critical", "#da3633", "#ffd7d5"),
-    "FUNCTIONAL": ("Major",    "#d29922", "#fde68a"),
-    "METADATA":   ("Minor",    "#1f7a6b", "#b3f0e8"),
-    "INFO":       ("Info",     "#8b949e", "#e6edf3"),
+    "BREAKING":   ("Breaking",   "#ff453a18", "#ff453a"),
+    "FUNCTIONAL": ("Functional", "#ff9f0a18", "#ff9f0a"),
+    "METADATA":   ("Metadata",   "#bf5af218", "#bf5af2"),
+    "INFO":       ("Info",       "#a1a1a618", "#a1a1a6"),
 }
 
 def _sev_display(sev: Severity) -> str:
@@ -54,13 +76,12 @@ def _sev_colors(sev: Severity) -> tuple[str, str]:
 # Views (tab definitions): name, icon, entity-set (None = all)
 # ---------------------------------------------------------------------------
 _VIEWS: list[tuple[str, str, Optional[set[str]]]] = [
-    ("All",        "📋", None),
-    ("Messages",   "📨", {"message"}),
-    ("Signals",    "📡", {"signal"}),
-    ("Nodes",      "🔗", {"node"}),
-    ("Attributes", "⚙",  {"attribute"}),
-    ("Env Vars",   "🌐", {"envvar"}),
-    ("J1939",      "🚛", {"j1939"}),
+    ("All changes",   "#a1a1a6", None),
+    ("Breaking only", "#ff453a", {"__BREAKING__"}),
+    ("Messages",      "#32d4d4", {"message"}),
+    ("Signals",       "#3478f6", {"signal"}),
+    ("Nodes / ECUs",  "#bf5af2", {"node"}),
+    ("Attributes",    "#ff9f0a", {"attribute"}),
 ]
 
 # ---------------------------------------------------------------------------
@@ -78,6 +99,33 @@ _PROTO_COLORS: dict[str, tuple[str, str]] = {
 def _esc(s: str) -> str:
     """HTML-escape a string for use in QTextEdit HTML."""
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_STYLE_PATH = Path(__file__).resolve().parent.parent / "resources" / "style.qss"
+
+
+def _load_app_stylesheet() -> str:
+    try:
+        return _STYLE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _apply_app_theme(app: QApplication) -> None:
+    app.setFont(QFont("DM Sans", 10))
+    app.setStyleSheet(_load_app_stylesheet())
+
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#0a0a0a"))
+    palette.setColor(QPalette.WindowText, QColor("#f5f5f7"))
+    palette.setColor(QPalette.Base, QColor("#0a0a0a"))
+    palette.setColor(QPalette.AlternateBase, QColor("#111111"))
+    palette.setColor(QPalette.Text, QColor("#f5f5f7"))
+    palette.setColor(QPalette.Button, QColor("#111111"))
+    palette.setColor(QPalette.ButtonText, QColor("#f5f5f7"))
+    palette.setColor(QPalette.Highlight, QColor("#3478f6"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    app.setPalette(palette)
 
 
 # ---------------------------------------------------------------------------
@@ -488,50 +536,58 @@ class DBCDropZone(QFrame):
 # ---------------------------------------------------------------------------
 
 class SummaryBadge(QWidget):
-    _CHIP_DEFS = [
-        ("total",      "Total",    "#21262d", "#e6edf3"),
-        ("BREAKING",   "Critical", "#da3633", "#ffd7d5"),
-        ("FUNCTIONAL", "Major",    "#d29922", "#fde68a"),
-        ("METADATA",   "Minor",    "#1f7a6b", "#b3f0e8"),
+    _CARD_DEFS = [
+        ("BREAKING",   "BREAKING",   "#ff453a"),
+        ("FUNCTIONAL", "FUNCTIONAL", "#ff9f0a"),
+        ("added",      "ADDED",      "#30d158"),
+        ("removed",    "REMOVED",    "#3478f6"),
+        ("METADATA",   "METADATA",   "#bf5af2"),
     ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        self._chips: dict[str, QLabel] = {}
-        for key, label, bg, fg in self._CHIP_DEFS:
-            chip = self._make_chip(label, "0", bg, fg)
-            self._chips[key] = chip
-            layout.addWidget(chip)
-        layout.addStretch()
+        layout.setSpacing(12)
+        self._cards: dict[str, tuple[QFrame, QLabel]] = {}
+        for key, label, accent in self._CARD_DEFS:
+            card, value = self._make_card(label, accent)
+            self._cards[key] = (card, value)
+            layout.addWidget(card)
 
     @staticmethod
-    def _make_chip(title: str, count: str, bg: str, fg: str) -> QLabel:
-        lbl = QLabel(f"{title}  <b>{count}</b>")
-        lbl.setStyleSheet(
-            f"background:{bg}; color:{fg}; border-radius:12px;"
-            f"padding:4px 12px; font-size:12px; border: none;"
-        )
-        return lbl
+    def _make_card(title: str, accent: str) -> tuple[QFrame, QLabel]:
+        frame = QFrame()
+        frame.setObjectName("statCard")
+        frame.setMinimumHeight(84)
+        frame.setStyleSheet(f"QFrame#statCard {{ border-top: 2px solid {accent}; }}")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("statTitle")
+        value_lbl = QLabel("0")
+        value_lbl.setObjectName("statValue")
+        layout.addWidget(title_lbl)
+        layout.addWidget(value_lbl)
+        layout.addStretch()
+        return frame, value_lbl
 
     def update(self, entries: list[DiffEntry]):
-        counts: dict[str, int] = {k: 0 for k in self._chips}
+        counts: dict[str, int] = {k: 0 for k in self._cards}
         for e in entries:
-            counts["total"] += 1
             counts[e.severity.name] = counts.get(e.severity.name, 0) + 1
-        for key, _, bg, fg in self._CHIP_DEFS:
-            n = counts.get(key, 0)
-            label_text = dict((k, l) for k, l, *_ in self._CHIP_DEFS)[key]
-            self._chips[key].setText(f"{label_text}  <b>{n}</b>")
+            counts[e.kind] = counts.get(e.kind, 0) + 1
+        for key, (_, value_lbl) in self._cards.items():
+            value_lbl.setText(str(counts.get(key, 0)))
 
 
 # ---------------------------------------------------------------------------
 # Table columns
 # ---------------------------------------------------------------------------
-_COLUMNS = ["Severity", "Entity", "Kind", "Path", "Old Value", "New Value", "Detail", "Protocol"]
-_COL_WIDTHS = [80, 80, 80, 220, 130, 130, 200, 80]
+_COLUMNS = ["Severity", "Protocol", "Message type", "Path", "Old", "→", "New"]
+_COL_WIDTHS = [90, 90, 110, 220, 140, 30, 140]
 
 # ---------------------------------------------------------------------------
 # Results table
@@ -546,86 +602,84 @@ class ResultsTable(QTableWidget):
         self.setShowGrid(False)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QTableWidget.SelectRows)
+        self.setSelectionMode(QTableWidget.SingleSelection)
         self.setSortingEnabled(True)
         self.horizontalHeader().setStretchLastSection(True)
         for i, w in enumerate(_COL_WIDTHS):
             self.setColumnWidth(i, w)
 
-    @staticmethod
-    def _entry_col_text(e: DiffEntry, col: int) -> str:
-        """Return the display text for a given column index."""
-        if col == 0:
-            return _sev_display(e.severity)
-        elif col == 1:
-            return e.entity
-        elif col == 2:
-            return e.kind
-        elif col == 3:
-            return e.path
-        elif col == 4:
-            return str(e.value_a) if e.value_a is not None else ""
-        elif col == 5:
-            return str(e.value_b) if e.value_b is not None else ""
-        elif col == 6:
-            return e.detail
-        elif col == 7:
-            return e.protocol
-        return ""
-
-    def populate(
-        self,
-        entries: list[DiffEntry],
-        severity_filter: str = "ALL",
-        entity_set: Optional[set[str]] = None,
-        param_col: Optional[int] = None,
-        param_value: str = "",
-    ):
+    def populate(self, entries: list[DiffEntry]) -> None:
         self.setSortingEnabled(False)
         self.setRowCount(0)
 
-        for e in entries:
-            # severity filter
-            if severity_filter != "ALL" and e.severity.name != severity_filter:
-                continue
-            # view/entity filter
-            if entity_set is not None and e.entity not in entity_set:
-                continue
-            # parameter column filter
-            if param_col is not None and param_value and param_value != "(all)":
-                if self._entry_col_text(e, param_col) != param_value:
-                    continue
+        mono = QFont("Courier New", 9)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
 
+        for e in entries:
             row = self.rowCount()
             self.insertRow(row)
+            self.setRowHeight(row, 40)
 
-            # Severity chip – store DiffEntry reference for detail panel
+            # Col 0: Severity chip — stores DiffEntry for detail panel
             bg, fg = _sev_colors(e.severity)
-            _sev_item = _colored_item(_sev_display(e.severity), bg, fg)
-            _sev_item.setData(Qt.ItemDataRole.UserRole, e)
-            self.setItem(row, 0, _sev_item)
+            sev_item = _colored_item(_sev_display(e.severity), bg, fg)
+            sev_item.setData(Qt.ItemDataRole.UserRole, e)
+            self.setItem(row, 0, sev_item)
 
-            # Entity chip
+            # Col 1: Protocol
             proto = e.protocol or ""
             pbg, pfg = _PROTO_COLORS.get(proto.lower(), _PROTO_COLORS[""])
-            self.setItem(row, 1, _colored_item(e.entity, pbg, pfg))
+            self.setItem(row, 1, _colored_item(proto, pbg, pfg) if proto else _cell_item(""))
 
-            # Kind
-            kind_colors = {
-                "added":   ("#1f4a1f", "#90ee90"),
-                "removed": ("#4a1f1f", "#ffaaaa"),
-                "changed": ("#3a3a1a", "#ffff99"),
-            }
-            kbg, kfg = kind_colors.get(e.kind.lower(), ("#21262d", "#e6edf3"))
-            self.setItem(row, 2, _colored_item(e.kind, kbg, kfg))
+            # Col 2: Message type
+            self.setItem(row, 2, _cell_item(e.msg_type or ""))
 
-            self.setItem(row, 3, _cell_item(e.path))
-            self.setItem(row, 4, _cell_item(str(e.value_a) if e.value_a is not None else ""))
-            self.setItem(row, 5, _cell_item(str(e.value_b) if e.value_b is not None else ""))
-            self.setItem(row, 6, _cell_item(e.detail))
-            self.setItem(row, 7, _cell_item(e.protocol))
-            self.setRowHeight(row, 28)
+            # Col 3: Path widget — message name bold + signal/attr muted monospace
+            parts = e.path.split(".", 1)
+            path_w = QWidget()
+            path_lay = QVBoxLayout(path_w)
+            path_lay.setContentsMargins(8, 4, 8, 4)
+            path_lay.setSpacing(1)
+            msg_lbl = QLabel(parts[0])
+            msg_lbl.setStyleSheet("color: #f5f5f7; font-weight: bold; background: transparent;")
+            path_lay.addWidget(msg_lbl)
+            if len(parts) > 1:
+                sig_lbl = QLabel(parts[1])
+                sig_lbl.setStyleSheet(
+                    "color: #a1a1a6; font-family: 'Courier New'; font-size: 11px; background: transparent;"
+                )
+                path_lay.addWidget(sig_lbl)
+            self.setItemWidget(row, 3, path_w)
+
+            # Col 4: Old value — red strikethrough monospace
+            old_text = str(e.value_a) if e.value_a is not None else ""
+            old_item = QTableWidgetItem(old_text)
+            old_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            old_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            if old_text:
+                old_font = QFont("Courier New", 9)
+                old_font.setStrikeOut(True)
+                old_item.setFont(old_font)
+                old_item.setForeground(QColor("#ff453a"))
+            self.setItem(row, 4, old_item)
+
+            # Col 5: Arrow — centered muted
+            arr_item = _cell_item("\u2192", Qt.AlignCenter)
+            arr_item.setForeground(QColor("#636366"))
+            self.setItem(row, 5, arr_item)
+
+            # Col 6: New value — green monospace
+            new_text = str(e.value_b) if e.value_b is not None else ""
+            new_item = QTableWidgetItem(new_text)
+            new_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            new_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            if new_text:
+                new_item.setFont(mono)
+                new_item.setForeground(QColor("#30d158"))
+            self.setItem(row, 6, new_item)
 
         self.setSortingEnabled(True)
+
 
     def current_entry(self) -> Optional[DiffEntry]:
         """Return the DiffEntry for the currently selected row, or None."""
@@ -636,49 +690,132 @@ class ResultsTable(QTableWidget):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
+class ConsistencyTable(QTableWidget):
+    _COLUMNS = ["File", "Level", "Rule", "Message", "Signal", "Description", "Fix Hint"]
+    _WIDTHS = [70, 90, 90, 180, 180, 360, 260]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setColumnCount(len(self._COLUMNS))
+        self.setHorizontalHeaderLabels(self._COLUMNS)
+        self.verticalHeader().setVisible(False)
+        self.setShowGrid(False)
+        self.setAlternatingRowColors(True)
+        self.setSelectionBehavior(QTableWidget.SelectRows)
+        self.setSelectionMode(QTableWidget.SingleSelection)
+        self.setSortingEnabled(False)
+        self.horizontalHeader().setStretchLastSection(True)
+        for index, width in enumerate(self._WIDTHS):
+            self.setColumnWidth(index, width)
+
+    def populate(self, records: list[dict]) -> None:
+        self.setRowCount(0)
+        level_colors = {
+            "ERROR":   ("#ff453a18", "#ff453a"),
+            "WARNING": ("#ff9f0a18", "#ff9f0a"),
+            "INFO":    ("#bf5af218", "#bf5af2"),
+        }
+
+        for record in records:
+            issue = record["issue"]
+            row = self.rowCount()
+            self.insertRow(row)
+            self.setItem(row, 0, _cell_item(record["source"]))
+            bg, fg = level_colors.get(issue.level, ("#21262D", "#E6EDF3"))
+            self.setItem(row, 1, _colored_item(issue.level, bg, fg))
+            self.setItem(row, 2, _cell_item(issue.rule_id))
+            self.setItem(row, 3, _cell_item(issue.message_name or "—"))
+            self.setItem(row, 4, _cell_item(issue.signal_name or "—"))
+            self.setItem(row, 5, _cell_item(issue.description or ""))
+            self.setItem(row, 6, _cell_item(issue.fix_hint or ""))
+            self.setRowHeight(row, 28)
+
+    def current_entry(self):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Detail / synopsis panel
 # ---------------------------------------------------------------------------
 
 class _DetailPanel(QWidget):
-    """Synopsis panel shown below the results table.
-
-    Displays structured, side-by-side detail for the selected DiffEntry,
-    including full signal/message metadata looked up from the loaded databases.
-    """
+    """Rich detail rail for the selected diff row."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("detailPanel")
+        self.setFixedWidth(300)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
 
-        _hdr = QLabel("  \u25c8  Detail \u2014 select a row above")
-        _hdr.setStyleSheet(
-            "background: #161b22; color: #8b949e; font-size: 11px; "
-            "padding: 4px 8px; border-top: 1px solid #30363d;"
-        )
-        layout.addWidget(_hdr)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+        header_col = QVBoxLayout()
+        header_col.setSpacing(2)
+        self._header = QLabel("Select a frame")
+        self._header.setObjectName("detailHeader")
+        self._subheader = QLabel("Frame ID and signal geometry appear here")
+        self._subheader.setObjectName("detailSubheader")
+        header_col.addWidget(self._header)
+        header_col.addWidget(self._subheader)
+        top_row.addLayout(header_col, 1)
 
-        self._text = QTextEdit()
-        self._text.setReadOnly(True)
-        self._text.setStyleSheet(
-            "QTextEdit {"
-            "  background: #0d1117;"
-            "  color: #e6edf3;"
-            "  border: none;"
-            "  border-top: 1px solid #30363d;"
-            "  font-family: 'Courier New', Consolas, monospace;"
-            "  font-size: 12px;"
-            "  padding: 8px;"
-            "}"
-        )
-        self._text.setHtml(
-            "<span style='color:#8b949e; font-style:italic;'>"
-            "Select a row to see details\u2026"
-            "</span>"
-        )
-        layout.addWidget(self._text)
+        self._proto_badge = QLabel("RAW")
+        self._proto_badge.setObjectName("detailBadge")
+        top_row.addWidget(self._proto_badge, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(top_row)
+
+        bit_wrap = QFrame()
+        bit_wrap.setObjectName("previewCard")
+        bit_layout = QVBoxLayout(bit_wrap)
+        bit_layout.setContentsMargins(12, 12, 12, 12)
+        bit_layout.setSpacing(8)
+        bit_title = QLabel("Bit Layout")
+        bit_title.setObjectName("previewTitle")
+        bit_layout.addWidget(bit_title)
+        bit_caption = QLabel("8 × 8 occupancy map")
+        bit_caption.setObjectName("bitCaption")
+        bit_layout.addWidget(bit_caption)
+
+        self._bit_grid = BitGridWidget()
+        bit_layout.addWidget(self._bit_grid, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self._bit_legend = QVBoxLayout()
+        self._bit_legend.setSpacing(6)
+        bit_layout.addLayout(self._bit_legend)
+        layout.addWidget(bit_wrap)
+
+        kv_wrap = QFrame()
+        kv_wrap.setObjectName("previewCard")
+        kv_outer = QVBoxLayout(kv_wrap)
+        kv_outer.setContentsMargins(12, 12, 12, 12)
+        kv_outer.setSpacing(8)
+        kv_title = QLabel("Attributes")
+        kv_title.setObjectName("previewTitle")
+        kv_outer.addWidget(kv_title)
+        self._kv_rows = QVBoxLayout()
+        self._kv_rows.setSpacing(6)
+        kv_outer.addLayout(self._kv_rows)
+        layout.addWidget(kv_wrap)
+
+        preview = QFrame()
+        preview.setObjectName("previewCard")
+        preview_layout = QVBoxLayout(preview)
+        preview_layout.setContentsMargins(14, 14, 14, 14)
+        preview_layout.setSpacing(8)
+        preview_glyph = QLabel("◫")
+        preview_glyph.setObjectName("previewGlyph")
+        preview_layout.addWidget(preview_glyph)
+        preview_title = QLabel("Selection Summary")
+        preview_title.setObjectName("previewTitle")
+        preview_layout.addWidget(preview_title)
+        self._preview_text = QLabel("Select a message or signal to inspect its impact, mapping, and current change context.")
+        self._preview_text.setWordWrap(True)
+        self._preview_text.setObjectName("previewText")
+        preview_layout.addWidget(self._preview_text)
+        layout.addWidget(preview)
+        layout.addStretch()
 
         self._db_a = None
         self._db_b = None
@@ -689,205 +826,173 @@ class _DetailPanel(QWidget):
 
     def update_entry(self, entry) -> None:
         if entry is None:
-            self._text.setHtml(
-                "<span style='color:#8b949e; font-style:italic;'>"
-                "Select a row to see details\u2026"
-                "</span>"
-            )
+            self._header.setText("Select a frame")
+            self._subheader.setText("Frame ID and signal geometry appear here")
+            self._proto_badge.setText("RAW")
+            self._preview_text.setText("Select a message or signal to inspect its impact, mapping, and current change context.")
+            self._set_kv_rows([])
+            self._update_bit_grid(None, None)
             return
-        self._text.setHtml(self._build_html(entry))
+        data = self._entry_data(entry)
+        self._header.setText(data["title"])
+        self._subheader.setText(data["subtitle"])
+        self._proto_badge.setText(data["badge"])
+        self._preview_text.setText(data["preview"])
+        self._set_kv_rows(data["rows"])
+        self._update_bit_grid(data["message"], data["signal"])
 
-    # -----------------------------------------------------------------------
-    # HTML builders
-    # -----------------------------------------------------------------------
+    def _set_kv_rows(self, rows: list[tuple[str, str]]) -> None:
+        while self._kv_rows.count():
+            item = self._kv_rows.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
 
-    def _build_html(self, e) -> str:
-        kind_color = {
-            "added": "#90ee90", "removed": "#ffaaaa", "changed": "#ffff99",
-        }.get(e.kind.lower(), "#e6edf3")
-        header = (
-            f"<p style='margin:0 0 4px 0; font-size:11px;'>"
-            f"<b style='color:#58a6ff;'>{_esc(e.path)}</b>"
-            f"&nbsp;&nbsp;"
-            f"<span style='background:#21262d; padding:1px 6px;"
-            f" border-radius:3px; color:#8b949e;'>{_esc(e.entity)}</span>"
-            f"&nbsp;"
-            f"<span style='color:{kind_color};'>{_esc(e.kind)}</span>"
-            f"</p>"
-            f"<hr style='border:0; border-top:1px solid #30363d; margin:4px 0;'/>"
-        )
-        if e.entity == "signal":
-            body = self._signal_detail(e)
-        elif e.entity == "message":
-            body = self._message_detail(e)
-        elif e.entity == "node":
-            body = self._node_detail(e)
-        else:
-            body = self._generic_detail(e)
-        return header + body
+        if not rows:
+            rows = [("State", "No selection")]
 
-    @staticmethod
-    def _row(label: str, val_a, val_b) -> str:
-        def _fmt(v, color: str) -> str:
-            if v is None:
-                return "<span style='color:#555;'>\u2014</span>"
-            return f"<span style='color:{color};'>{_esc(str(v))}</span>"
+        for key, value in rows[:9]:
+            row = QFrame()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            key_lbl = QLabel(key)
+            key_lbl.setObjectName("kvKey")
+            val_lbl = QLabel(value)
+            val_lbl.setObjectName("kvValue")
+            val_lbl.setWordWrap(True)
+            row_layout.addWidget(key_lbl)
+            row_layout.addStretch()
+            row_layout.addWidget(val_lbl, 1)
+            self._kv_rows.addWidget(row)
+        self._kv_rows.addStretch()
 
-        changed = (
-            val_a is not None and val_b is not None
-            and str(val_a) != str(val_b)
-        )
-        bg = " background:#1e1e10;" if changed else ""
-        return (
-            f"<tr style='{bg}'>"
-            f"<td style='color:#8b949e; padding:2px 14px 2px 4px;"
-            f" white-space:nowrap; vertical-align:top;'>{_esc(label)}</td>"
-            f"<td style='padding:2px 14px 2px 4px; vertical-align:top;'>"
-            f"{_fmt(val_a, '#ffaaaa')}</td>"
-            f"<td style='padding:2px 4px; vertical-align:top;'>"
-            f"{_fmt(val_b, '#90ee90')}</td>"
-            f"</tr>"
-        )
+    def _update_bit_grid(self, message, signal) -> None:
+        self._bit_grid.load_message(message)
+        self._set_bit_legend(self._bit_grid.legend_items(), signal.name if signal is not None else "")
 
-    @staticmethod
-    def _tbl(rows: str) -> str:
-        return (
-            "<table style='border-collapse:collapse; width:100%; font-size:12px;'>"
-            "<tr style='background:#161b22;'>"
-            "<th style='text-align:left; padding:3px 14px 3px 4px; color:#6e7681;"
-            " font-weight:normal; font-size:11px;'>Field</th>"
-            "<th style='text-align:left; padding:3px 14px; color:#ffaaaa;"
-            " font-weight:normal; font-size:11px;'>\u25c4 File A</th>"
-            "<th style='text-align:left; padding:3px 4px; color:#90ee90;"
-            " font-weight:normal; font-size:11px;'>\u25ba File B</th>"
-            "</tr>" + rows + "</table>"
-        )
+    def _set_bit_legend(self, items: list[tuple[str, str]], selected_signal: str = "") -> None:
+        while self._bit_legend.count():
+            item = self._bit_legend.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
 
-    # -----------------------------------------------------------------------
+        if not items:
+            empty = QLabel("No signals mapped")
+            empty.setObjectName("bitCaption")
+            self._bit_legend.addWidget(empty)
+            return
 
-    def _signal_detail(self, e) -> str:
-        parts = e.path.split(".")
-        if len(parts) < 2:
-            return self._generic_detail(e)
-        msg_name, sig_name = parts[0], parts[1]
-        sig_a = sig_b = msg_a = msg_b = None
-        if self._db_a:
+        rows = QHBoxLayout()
+        rows.setSpacing(6)
+        for idx, (name, color) in enumerate(items):
+            chip = QFrame()
+            chip.setObjectName("legendItem")
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(0, 0, 0, 0)
+            chip_layout.setSpacing(6)
+
+            swatch = QLabel()
+            swatch.setObjectName("legendSwatch")
+            swatch.setFixedSize(12, 12)
+            swatch.setStyleSheet(f"background:{color}; border-radius:6px;")
+            chip_layout.addWidget(swatch)
+
+            label = QLabel(name)
+            label.setObjectName("kvValue" if name == selected_signal else "bitCaption")
+            chip_layout.addWidget(label)
+            rows.addWidget(chip)
+
+            if (idx + 1) % 2 == 0:
+                rows.addStretch()
+                self._bit_legend.addLayout(rows)
+                rows = QHBoxLayout()
+                rows.setSpacing(6)
+
+        if rows.count():
+            rows.addStretch()
+            self._bit_legend.addLayout(rows)
+
+    def _message_name_from_path(self, entry) -> str:
+        path = entry.path or ""
+        if path.startswith("message."):
+            fragment = path.split(".", 1)[1]
+            return fragment.split("(", 1)[0]
+        return path.split(".", 1)[0]
+
+    def _signal_name_from_path(self, entry) -> str:
+        parts = (entry.path or "").split(".")
+        if parts and parts[0] == "message" and len(parts) > 2:
+            return parts[2].split("(", 1)[0]
+        if len(parts) > 1:
+            return parts[1].split("(", 1)[0]
+        return ""
+
+    def _find_message(self, entry):
+        msg_name = self._message_name_from_path(entry)
+        for db in (self._db_b, self._db_a):
+            if db is None:
+                continue
             try:
-                msg_a = self._db_a.get_message_by_name(msg_name)
-                sig_a = msg_a.get_signal_by_name(sig_name)
+                return db.get_message_by_name(msg_name)
             except Exception:
-                pass
-        if self._db_b:
-            try:
-                msg_b = self._db_b.get_message_by_name(msg_name)
-                sig_b = msg_b.get_signal_by_name(sig_name)
-            except Exception:
-                pass
+                continue
+        return None
 
-        def _info(sig, msg):
-            if sig is None:
-                return {}
-            choices_str = (
-                ", ".join(f"{k}={v}" for k, v in sig.choices.items())
-                if sig.choices else "\u2014"
-            )
-            return {
-                "Parent message": (
-                    f"{msg.name} (0x{msg.frame_id:03X})" if msg else "\u2014"
-                ),
-                "Senders": (
-                    ", ".join(msg.senders) if msg and msg.senders else "\u2014"
-                ),
-                "Receivers": (
-                    ", ".join(getattr(sig, "receivers", None) or []) or "\u2014"
-                ),
-                "Start bit": sig.start,
-                "Length (bits)": sig.length,
-                "Byte order": (
-                    str(getattr(sig, "byte_order", "")).split(".")[-1].lower()
-                    or "\u2014"
-                ),
-                "Scale": sig.scale,
-                "Offset": sig.offset,
-                "Min": sig.minimum,
-                "Max": sig.maximum,
-                "Unit": sig.unit or "\u2014",
-                "Choices / Values": choices_str,
-                "Is multiplexer": getattr(sig, "is_multiplexer", "\u2014"),
-                "Mux IDs": str(
-                    getattr(sig, "multiplexer_ids", None) or "\u2014"
-                ),
-                "Comment": (
-                    _esc(sig.comment or "").replace("\n", " ") or "\u2014"
-                ),
-            }
+    def _find_signal(self, entry, message):
+        if message is None:
+            return None
+        sig_name = self._signal_name_from_path(entry)
+        if not sig_name:
+            return None
+        try:
+            return message.get_signal_by_name(sig_name)
+        except Exception:
+            return None
 
-        ia, ib = _info(sig_a, msg_a), _info(sig_b, msg_b)
-        if not ia and not ib:
-            return "<i style='color:#8b949e;'>Signal not found in loaded files.</i>"
-        keys = list(dict.fromkeys(list(ia) + list(ib)))
-        rows = "".join(self._row(k, ia.get(k), ib.get(k)) for k in keys)
-        return self._tbl(rows)
+    def _entry_data(self, entry) -> dict:
+        message = self._find_message(entry)
+        signal = self._find_signal(entry, message) if entry.entity == "signal" else None
+        frame_id = f"0x{message.frame_id:03X}" if message is not None else "No frame"
+        title = f"{frame_id} · {message.name}" if message is not None else entry.path
+        subtitle = f"{entry.entity.title()} • {entry.kind.title()} • {_sev_display(entry.severity)}"
+        badge = (entry.protocol or entry.msg_type or "RAW").upper()
+        rows = [
+            ("Path", entry.path or "—"),
+            ("Old", str(entry.value_a) if entry.value_a is not None else "—"),
+            ("New", str(entry.value_b) if entry.value_b is not None else "—"),
+            ("Message Type", entry.msg_type or "—"),
+        ]
+        if message is not None:
+            rows.extend([
+                ("Frame ID", frame_id),
+                ("DLC", str(message.length)),
+                ("Senders", ", ".join(message.senders) if message.senders else "—"),
+            ])
+        if signal is not None:
+            rows.extend([
+                ("Signal", signal.name),
+                ("Start Bit", str(signal.start)),
+                ("Length", str(signal.length)),
+                ("Unit", signal.unit or "—"),
+            ])
+        if entry.detail:
+            rows.append(("Change Impact", entry.detail))
 
-    def _message_detail(self, e) -> str:
-        msg_name = e.path.split(".")[0]
-        msg_a = msg_b = None
-        if self._db_a:
-            try:
-                msg_a = self._db_a.get_message_by_name(msg_name)
-            except Exception:
-                pass
-        if self._db_b:
-            try:
-                msg_b = self._db_b.get_message_by_name(msg_name)
-            except Exception:
-                pass
-
-        def _info(msg):
-            if msg is None:
-                return {}
-            return {
-                "CAN ID (hex)": f"0x{msg.frame_id:03X}",
-                "CAN ID (dec)": msg.frame_id,
-                "DLC (bytes)": msg.length,
-                "Is extended ID": msg.is_extended_id,
-                "Is CAN FD": getattr(msg, "is_fd", False),
-                "Senders": ", ".join(msg.senders) if msg.senders else "\u2014",
-                "Signal count": len(msg.signals),
-                "Signals": ", ".join(s.name for s in msg.signals) or "\u2014",
-                "Comment": (
-                    _esc(msg.comment or "").replace("\n", " ") or "\u2014"
-                ),
-            }
-
-        ia, ib = _info(msg_a), _info(msg_b)
-        if not ia and not ib:
-            return "<i style='color:#8b949e;'>Message not found in loaded files.</i>"
-        keys = list(dict.fromkeys(list(ia) + list(ib)))
-        rows = "".join(self._row(k, ia.get(k), ib.get(k)) for k in keys)
-        return self._tbl(rows)
-
-    def _node_detail(self, e) -> str:
-        rows = (
-            self._row("Path", e.path, e.path)
-            + self._row("Value (A)", e.value_a, None)
-            + self._row("Value (B)", None, e.value_b)
+        preview = entry.detail or (
+            f"{entry.msg_type or entry.entity.title()} change in a frame with "
+            f"{len(getattr(message, 'signals', [])) if message is not None else 0} mapped signals."
         )
-        if e.detail:
-            rows += self._row("Detail", e.detail, None)
-        return self._tbl(rows)
-
-    def _generic_detail(self, e) -> str:
-        rows = (
-            self._row("Path", e.path, e.path)
-            + self._row("Value (A)", e.value_a, None)
-            + self._row("Value (B)", None, e.value_b)
-        )
-        if e.detail:
-            rows += self._row("Detail", e.detail, None)
-        if e.protocol:
-            rows += self._row("Protocol", e.protocol, e.protocol)
-        return self._tbl(rows)
+        return {
+            "title": title,
+            "subtitle": subtitle,
+            "badge": badge,
+            "rows": rows,
+            "preview": preview,
+            "message": message,
+            "signal": signal,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1252,11 +1357,120 @@ def _motorola_bits(start_bit: int, length: int) -> set[int]:
     return bits
 
 
+def _motorola_start_bit(sig) -> int:
+    """Return cantools' byte-aligned Motorola start bit when available."""
+    try:
+        return int(cantools.database.can.signal.start_bit(sig))
+    except Exception:
+        return int(sig.start)
+
+
 def _signal_bits(sig) -> set[int]:
     """Return DBC bit positions for *sig* regardless of byte order."""
     if getattr(sig, "byte_order", "little_endian") == "big_endian":
-        return _motorola_bits(int(sig.start), int(sig.length))
+        start_bit = _motorola_start_bit(sig)
+        return set(range(start_bit, start_bit + int(sig.length)))
     return set(range(int(sig.start), int(sig.start) + int(sig.length)))
+
+
+_BIT_GRID_COLORS = [
+    "#58A6FF",
+    "#3FB950",
+    "#D29922",
+    "#F85149",
+    "#8957E5",
+    "#39D0D8",
+    "#FF7B72",
+    "#FFA657",
+]
+
+
+class BitGridWidget(QWidget):
+    """64-cell bit layout widget using QLabel cells."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        self._cells: list[QLabel] = []
+        self._legend: list[tuple[str, str]] = []
+        self._color_map: dict[int, str] = {}
+        self._message = None
+
+        for row in range(8):
+            for col in range(8):
+                bit_index = (row * 8) + col
+                cell = QLabel(str(bit_index))
+                cell.setObjectName("bitCell")
+                cell.setFixedSize(22, 22)
+                cell.setToolTip(f"Bit {bit_index}")
+                grid.addWidget(cell, row, col)
+                self._cells.append(cell)
+
+    def legend_items(self) -> list[tuple[str, str]]:
+        return list(self._legend)
+
+    def load_message(self, msg) -> None:
+        self._message = msg
+        self._legend = []
+        color_map: dict[str, str] = {}
+        occupied: dict[int, tuple[str, object]] = {}
+
+        if msg is not None:
+            signals = sorted(msg.signals, key=lambda sig: sig.name)
+            for idx, sig in enumerate(signals):
+                color = _BIT_GRID_COLORS[idx % len(_BIT_GRID_COLORS)]
+                color_map[sig.name] = color
+                self._legend.append((sig.name, color))
+                for bit in _signal_bits(sig):
+                    if 0 <= bit < 64:
+                        occupied[bit] = (color, sig)
+
+        self._color_map = {bit: color for bit, (color, _) in occupied.items()}
+        for bit_index, cell in enumerate(self._cells):
+            if bit_index in occupied:
+                color, sig = occupied[bit_index]
+                cell.setStyleSheet(
+                    f"background:{color}; color:#0A0A0A; border:1px solid {color}; border-radius:7px;"
+                )
+                cell.setText(sig.name[:2].upper())
+                cell.setToolTip(f"{sig.name}\nstart_bit={sig.start}\nlength={sig.length}")
+            else:
+                cell.setStyleSheet(
+                    "background:#4A515B; color:#D4D9E0; border:1px solid #5A6370; border-radius:7px;"
+                )
+                cell.setText(str(bit_index % 8))
+                cell.setToolTip(f"Bit {bit_index}")
+
+    def set_bytes(self, data: bytes) -> None:
+        """Re-colour cells based on which bits are set in *data*."""
+        if self._message is None:
+            return
+        set_bits: set[int] = set()
+        for bi, bv in enumerate(data[: self._message.length]):
+            for bp in range(8):
+                if bv & (1 << bp):
+                    set_bits.add(bi * 8 + bp)
+        for bit_index, cell in enumerate(self._cells):
+            if bit_index in self._color_map:
+                color = self._color_map[bit_index]
+                if bit_index in set_bits:
+                    cell.setStyleSheet(
+                        f"background:{color}; color:#0A0A0A;"
+                        " border:2px solid #FFFFFF; border-radius:7px;"
+                    )
+                else:
+                    cell.setStyleSheet(
+                        f"background:#1c2128; color:{color};"
+                        " border:1px solid #30363d; border-radius:7px;"
+                    )
+            else:
+                cell.setStyleSheet(
+                    "background:#4A515B; color:#D4D9E0;"
+                    " border:1px solid #5A6370; border-radius:7px;"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1320,6 +1534,13 @@ class _BitGridCanvas(QWidget):
         self._signals = sigs
         self.update()
 
+    def get_signal_color_map(self) -> dict:
+        """Return ``{signal_name: QColor}`` for every signal in the current message."""
+        result: dict = {}
+        for sig, color in self._cell_map.values():
+            result[sig.name] = color
+        return result
+
     # ── geometry helpers ────────────────────────────────────────────────────
 
     def _cell_w(self) -> int:
@@ -1349,11 +1570,11 @@ class _BitGridCanvas(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        C_BG         = QColor("#1c2128")
-        C_HDR        = QColor("#161b22")
-        C_BORDER     = QColor("#30363d")
-        C_HOVER_BORD = QColor("#58a6ff")
-        C_EMPTY      = QColor("#21262d")
+        C_BG         = QColor("#0a0a0a")
+        C_HDR        = QColor("#111111")
+        C_BORDER     = QColor("#2a2a2e")
+        C_HOVER_BORD = QColor("#3478f6")
+        C_EMPTY      = QColor("#1c1c1e")
         C_HDR_TXT    = QColor("#8b949e")
         C_CELL_TXT   = QColor("#0d1117")
 
@@ -1483,6 +1704,7 @@ class ViewerDialog(QDialog):
         tabs.addTab(self._build_nodes_tab(),         "🔗  Nodes")
         tabs.addTab(self._build_consistency_tab(),   "⚠️  Consistency")
         tabs.addTab(self._build_timing_tab(),        "⏱️  Timing")
+        tabs.addTab(self._build_timeline_tab(),       "📊  Timeline")
         root.addWidget(tabs, stretch=1)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -2092,6 +2314,597 @@ class ViewerDialog(QDialog):
         return w
 
 
+    def _build_timeline_tab(self) -> QWidget:
+        """7th tab: temporal bus heatmap — cyclic message transmission timeline."""
+        return TemporalHeatmapWidget(self._db)
+
+
+# ---------------------------------------------------------------------------
+# Temporal Bus Heatmap Widget
+# ---------------------------------------------------------------------------
+
+
+class TemporalHeatmapWidget(QWidget):
+    """Interactive timeline showing when each cyclic message fires.
+
+    - X-axis: 0 → window_ms (selectable: 100/500/1000/5000 ms)
+    - Each row: one cyclic message; vertical bars at t=0, cycle_time, 2×, …
+    - Bar height scales with DLC; unique colour per message
+    - Overlap detection: two messages in the same ms bucket → red indicator
+    - Tooltip on hover: name, frame_id, cycle_time, DLC, sender
+    """
+
+    _LABEL_W = 140      # Fixed-width label column (px)
+    _ROW_H   = 22       # Pixels per message row
+    _BAR_W   = 5        # Width of each transmission bar (px)
+    _H_PAD   = 6        # Vertical padding inside a row
+    _ZOOM_OPTIONS = [100, 500, 1000, 5000]   # window sizes in ms
+
+    # 10-colour palette — matches ViewerDialog._CELL_COLORS accents
+    _PALETTE = [
+        "#90ee90", "#7ec8e3", "#ee9090", "#c87ee3",
+        "#e3c87e", "#7ee3e3", "#d07ee3", "#7ee3a0",
+        "#e3e37e", "#7ee3c8",
+    ]
+
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self._db = db
+        self._window_ms = 500
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        # ── Controls row ──────────────────────────────────────────────────
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel("Window:"))
+        self._zoom_cb = QComboBox()
+        for v in self._ZOOM_OPTIONS:
+            self._zoom_cb.addItem(f"{v} ms", v)
+        self._zoom_cb.setCurrentIndex(1)   # 500 ms default
+        self._zoom_cb.setFixedWidth(100)
+        self._zoom_cb.currentIndexChanged.connect(self._on_zoom_changed)
+        ctrl.addWidget(self._zoom_cb)
+        ctrl.addSpacing(12)
+        self._info_lbl = QLabel()
+        self._info_lbl.setStyleSheet("color:#8b949e; font-size:11px;")
+        ctrl.addWidget(self._info_lbl)
+        ctrl.addStretch()
+        root.addLayout(ctrl)
+
+        # ── Two-panel layout: fixed label column + scrollable scene ───────
+        h_split = QHBoxLayout()
+        h_split.setSpacing(0)
+
+        # Left: label panel
+        self._label_scene = QGraphicsScene(self)
+        self._label_view  = QGraphicsView(self._label_scene)
+        self._label_view.setFixedWidth(self._LABEL_W)
+        self._label_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._label_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._label_view.setStyleSheet("background:#0d1117; border:none; border-right:1px solid #30363d;")
+        h_split.addWidget(self._label_view)
+
+        # Right: main timeline scene
+        self._scene = QGraphicsScene(self)
+        self._view  = QGraphicsView(self._scene)
+        self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._view.setStyleSheet("background:#0d1117; border:none;")
+        self._view.setMouseTracking(True)
+        self._view.viewport().installEventFilter(self)
+        h_split.addWidget(self._view, stretch=1)
+
+        # Sync vertical scrollbars
+        self._view.verticalScrollBar().valueChanged.connect(
+            self._label_view.verticalScrollBar().setValue
+        )
+
+        root.addLayout(h_split, stretch=1)
+
+        self._rebuild()
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _msg_color(self, idx: int) -> str:
+        return self._PALETTE[idx % len(self._PALETTE)]
+
+    def _cyclic_messages(self):
+        """Return sorted list of (index, message) for cyclic messages."""
+        result = []
+        for m in sorted(self._db.messages, key=lambda x: x.name):
+            ct = getattr(m, "cycle_time", None) or 0
+            if ct > 0:
+                result.append(m)
+        return result
+
+    # ── Rebuild ───────────────────────────────────────────────────────────
+
+    def _rebuild(self) -> None:
+        self._scene.clear()
+        self._label_scene.clear()
+
+        msgs = self._cyclic_messages()
+        if not msgs:
+            no_msg = self._scene.addText("No cyclic messages found in this DBC file.")
+            no_msg.setDefaultTextColor(Qt.GlobalColor.gray)
+            no_msg.setPos(20, 20)
+            self._info_lbl.setText("")
+            return
+
+        win = self._window_ms
+        row_h = self._ROW_H
+        bar_w = self._BAR_W
+        h_pad = self._H_PAD
+        label_w = self._LABEL_W - 8   # slight inner margin
+
+        # Width of the graphics scene in pixels — 1px per ms, min 600
+        scene_w = max(win, 600)
+        scene_h = len(msgs) * row_h
+
+        self._scene.setSceneRect(0, 0, scene_w, scene_h)
+        self._label_scene.setSceneRect(0, 0, label_w, scene_h)
+
+        # ── Overlap detection: bucket ms → list of (row, name) ────────────
+        buckets: dict[int, list] = {}
+        for row_idx, m in enumerate(msgs):
+            ct = int(round(getattr(m, "cycle_time", 0) or 0))
+            if ct <= 0:
+                continue
+            t = 0
+            while t <= win:
+                buckets.setdefault(t, []).append(row_idx)
+                t += ct
+
+        overlap_rows: set[tuple[int, int]] = set()   # (row_idx, t_ms)
+        for t_ms, rows in buckets.items():
+            if len(rows) > 1:
+                for r in rows:
+                    overlap_rows.add((r, t_ms))
+
+        total_overlaps = len({t for t, rs in buckets.items() if len(rs) > 1})
+
+        # ── Draw rows ────────────────────────────────────────────────────
+        from PySide6.QtGui import QColor, QFont, QPen, QBrush  # noqa: PLC0415
+
+        axis_pen   = QPen(QColor("#30363d"))
+        axis_pen.setWidth(1)
+
+        for row_idx, m in enumerate(msgs):
+            y0 = row_idx * row_h
+            color_hex = self._msg_color(row_idx)
+            color = QColor(color_hex)
+            ct_ms = int(round(getattr(m, "cycle_time", 0) or 0))
+            dlc = getattr(m, "length", 1) or 1           # bytes
+            bar_h = min(max(dlc * 2 + 2, 4), row_h - h_pad * 2)
+            bar_y = y0 + (row_h - bar_h) / 2
+            sender = ", ".join(m.senders) if m.senders else "—"
+
+            # Row separator
+            sep = self._scene.addLine(0, y0 + row_h - 1, scene_w, y0 + row_h - 1, axis_pen)
+            sep.setZValue(0)
+
+            # Label (left panel)
+            lbl_sep = self._label_scene.addLine(0, y0 + row_h - 1, label_w, y0 + row_h - 1, axis_pen)
+            lbl_sep.setZValue(0)
+            lbl_txt = self._label_scene.addText(m.name)
+            lbl_txt.setDefaultTextColor(color)
+            fnt = QFont("Consolas", 8)
+            lbl_txt.setFont(fnt)
+            lbl_txt.setPos(4, y0 + (row_h - 14) / 2)
+            # Clip text width
+            if lbl_txt.boundingRect().width() > label_w - 6:
+                lbl_txt.setTextWidth(label_w - 6)
+
+            if ct_ms <= 0:
+                continue
+
+            # ── Draw transmission bars ───────────────────────────────────
+            t = 0
+            brush_normal  = QBrush(color)
+            brush_overlap = QBrush(QColor("#da3633"))
+            pen_none = QPen(Qt.PenStyle.NoPen)
+
+            while t <= win:
+                x = t   # 1 px per ms
+                is_overlap = (row_idx, t) in overlap_rows
+                rect_item = self._scene.addRect(
+                    QRectF(x, bar_y, bar_w, bar_h),
+                    pen_none,
+                    brush_overlap if is_overlap else brush_normal,
+                )
+                rect_item.setZValue(1)
+
+                # Tooltip data stored via setData
+                tip = (
+                    f"<b>{m.name}</b><br/>"
+                    f"Frame ID: 0x{m.frame_id:X}<br/>"
+                    f"Cycle: {ct_ms} ms<br/>"
+                    f"DLC: {dlc} bytes<br/>"
+                    f"Sender: {sender}<br/>"
+                    f"t = {t} ms"
+                    + ("<br/><span style='color:#da3633'>⚠ Overlap!</span>" if is_overlap else "")
+                )
+                rect_item.setToolTip(tip)
+                rect_item.setAcceptHoverEvents(True)
+
+                t += ct_ms
+
+        # ── X-axis tick labels ────────────────────────────────────────────
+        tick_pen = QPen(QColor("#58a6ff"))
+        tick_font = QFont("Consolas", 7)
+        tick_interval = win // 10 or 1
+        for t in range(0, win + 1, tick_interval):
+            tick_lbl = self._scene.addText(f"{t}")
+            tick_lbl.setDefaultTextColor(QColor("#58a6ff"))
+            tick_lbl.setFont(tick_font)
+            tick_lbl.setPos(t, scene_h + 2)
+            tick_lbl.setZValue(2)
+
+        # Extend scene height to accommodate tick labels
+        self._scene.setSceneRect(0, 0, scene_w, scene_h + 16)
+
+        # ── Info label ────────────────────────────────────────────────────
+        skip = len(self._db.messages) - len(msgs)
+        parts = [f"{len(msgs)} cyclic message(s)"]
+        if skip:
+            parts.append(f"{skip} skipped (no cycle time)")
+        if total_overlaps:
+            parts.append(f"⚠ {total_overlaps} overlap slot(s) (red)")
+        self._info_lbl.setText("  ·  ".join(parts))
+
+    # ── Zoom ─────────────────────────────────────────────────────────────
+
+    def _on_zoom_changed(self, _idx: int) -> None:
+        self._window_ms = self._zoom_cb.currentData()
+        self._rebuild()
+
+    # ── Event filter for tooltip support on QGraphicsView ────────────────
+
+    def eventFilter(self, obj, event):   # noqa: N802
+        from PySide6.QtCore import QEvent  # noqa: PLC0415
+        if obj is self._view.viewport() and event.type() == QEvent.Type.ToolTip:
+            pos = event.pos()
+            scene_pos = self._view.mapToScene(pos)
+            item = self._scene.itemAt(scene_pos, self._view.transform())
+            if item and item.toolTip():
+                QToolTip.showText(event.globalPos(), item.toolTip(), self._view)
+                return True
+        return super().eventFilter(obj, event)
+
+
+# ---------------------------------------------------------------------------
+# 3-D Bus Simulation widget  (QWebEngineView + Three.js r128)
+# ---------------------------------------------------------------------------
+
+
+class ThreeSimWidget(QWidget):
+    """Interactive 3-D CAN bus animation (Three.js inside QWebEngineView).
+
+    X = time (ms, scrolling window)
+    Y = message row (sorted by frame_id)
+    DLC encoded as bar width
+    """
+
+    _FALLBACK_HTML = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>body{background:#0d1117;display:flex;align-items:center;"
+        "justify-content:center;height:100vh;color:#58a6ff;"
+        "font-family:Consolas}</style></head>"
+        "<body><h2>resources/3d_sim.html not found \u2014 "
+        "re-install dbcdiff</h2></body></html>"
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._db               = None
+        self._entries: list    = []
+        self._sim_mode: str    = "viewer"
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        if _WEB_ENGINE_OK and _QWebEngineView is not None:
+            self._view = _QWebEngineView()
+            root.addWidget(self._view)
+            self._view.setHtml(self._idle_html())
+        else:
+            self._view = None
+            msg = QLabel(
+                "<div style='text-align:center'>"
+                "<h2 style='color:#58a6ff'>\U0001f5b2\ufe0f\u00a0 3D Bus Sim</h2>"
+                "<p style='color:#8b949e;margin-top:8px'>"
+                "PySide6-WebEngine is not installed.</p>"
+                "<code style='background:#161b22;border:1px solid #30363d;"
+                "padding:6px 14px;border-radius:4px;display:inline-block;"
+                "margin-top:10px'>pip install PySide6-WebEngine</code>"
+                "<p style='color:#8b949e;margin-top:8px;font-size:11px'>"
+                "Then restart dbcdiff.</p></div>"
+            )
+            msg.setTextFormat(Qt.TextFormat.RichText)
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            msg.setStyleSheet("background:#0d1117;padding:40px;")
+            root.addWidget(msg)
+
+    def load(self, db, entries: list | None = None, mode: str = "viewer") -> None:
+        """Populate the 3-D scene from *db* (cantools Database) and diff *entries*."""
+        if self._view is None:
+            return
+        self._db       = db
+        self._entries  = list(entries or [])
+        self._sim_mode = mode
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if self._view is None or self._db is None:
+            return
+        import json as _j
+        html = self._get_template().replace(
+            "/*INJECT_DATA*/null/*END_INJECT*/",
+            _j.dumps(self._build_data(), separators=(",", ":")),
+        )
+        self._view.setHtml(html)
+
+    def _build_data(self) -> dict:
+        _rank = {"breaking": 4, "functional": 3, "added": 2, "metadata": 1}
+        sev: dict[str, str] = {}
+        if self._sim_mode == "diff":
+            for e in self._entries:
+                parts = (getattr(e, "path", "") or "").split(".")
+                if len(parts) >= 2 and parts[0] == "messages":
+                    nm = parts[1]
+                    sr = getattr(e.severity, "name", "METADATA").lower()
+                    if getattr(e, "kind", "") in ("extra", "missing"):
+                        sr = "added"
+                    if _rank.get(sr, 0) > _rank.get(sev.get(nm, ""), 0):
+                        sev[nm] = sr
+        msgs = []
+        for m in sorted(self._db.messages, key=lambda x: x.frame_id):
+            msgs.append({
+                "name":         m.name,
+                "frame_id":     m.frame_id,
+                "dlc":          m.length,
+                "cycle_time":   m.cycle_time or 0,
+                "senders":      list(m.senders or []),
+                "comment":      m.comment or "",
+                "signal_count": len(m.signals),
+                "signals": [
+                    {
+                        "name":      s.name,
+                        "start_bit": s.start,
+                        "length":    s.length,
+                        "is_signed": bool(getattr(s, "is_signed", False)),
+                    }
+                    for s in sorted(m.signals, key=lambda s: s.start)
+                ],
+                "severity": (sev.get(m.name, "unchanged")
+                             if self._sim_mode == "diff" else None),
+            })
+        return {"mode": self._sim_mode, "messages": msgs}
+
+    @staticmethod
+    def _get_template() -> str:
+        p = Path(__file__).parent / "resources" / "3d_sim.html"
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+        return ThreeSimWidget._FALLBACK_HTML
+
+    @staticmethod
+    def _idle_html() -> str:
+        return (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>*{margin:0;padding:0}body{background:#0d1117;"
+            "display:flex;flex-direction:column;align-items:center;"
+            "justify-content:center;height:100vh;color:#c9d1d9;"
+            "font-family:Consolas,monospace;gap:14px}"
+            "h2{color:#58a6ff;font-size:18px}"
+            "p{color:#8b949e;font-size:13px;text-align:center}</style>"
+            "</head><body>"
+            "<div style='font-size:48px'>\U0001f5b2\ufe0f</div>"
+            "<h2>3D Bus Simulation</h2>"
+            "<p>Run <b>Compare</b> or open <b>Visualize</b> mode<br>"
+            "to populate the 3D scene.</p>"
+            "</body></html>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Decoder tab — live CAN frame decoder
+# ---------------------------------------------------------------------------
+
+
+class DecoderTab(QWidget):
+    """Live CAN frame decoder — hex bytes in, signal physical values out."""
+
+    _COLS = ["Signal", "Raw (hex)", "Physical", "Unit", "Min", "Max", "In Range?"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._db = None
+        self._msg = None
+        self._guard = False
+        self._build_ui()
+
+    def set_database(self, db) -> None:
+        """Populate the message dropdown from *db* (a cantools Database)."""
+        self._db = db
+        self._msg_combo.blockSignals(True)
+        self._msg_combo.clear()
+        self._msg_combo.blockSignals(False)
+        if db is None:
+            self._clear_table()
+            return
+        for msg in sorted(db.messages, key=lambda m: m.name):
+            self._msg_combo.addItem(f"0x{msg.frame_id:03X}  {msg.name}", userData=msg)
+        if self._msg_combo.count():
+            self._on_msg_changed(0)
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        # ── message selector ──────────────────────────────────────────────
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Message:"))
+        self._msg_combo = QComboBox()
+        self._msg_combo.setMinimumWidth(300)
+        self._msg_combo.currentIndexChanged.connect(self._on_msg_changed)
+        top.addWidget(self._msg_combo, stretch=1)
+        top.addStretch()
+        root.addLayout(top)
+
+        # ── 8 byte inputs with per-column sliders ──────────────────────────
+        byte_row = QHBoxLayout()
+        byte_row.setSpacing(6)
+        self._byte_edits: list[QLineEdit] = []
+        self._byte_sliders: list[QSlider] = []
+        for i in range(8):
+            col_wrap = QVBoxLayout()
+            col_wrap.setSpacing(2)
+            lbl = QLabel(f"B{i}")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("font-size:10px; color:#8b949e;")
+            col_wrap.addWidget(lbl)
+            edit = QLineEdit("00")
+            edit.setMaxLength(2)
+            edit.setFixedWidth(46)
+            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit.textChanged.connect(self._on_byte_changed)
+            col_wrap.addWidget(edit)
+            self._byte_edits.append(edit)
+            slider = QSlider(Qt.Orientation.Vertical)
+            slider.setRange(0, 255)
+            slider.setVisible(False)
+            slider.setFixedHeight(70)
+            slider.valueChanged.connect(self._make_slider_handler(i))
+            col_wrap.addWidget(slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+            self._byte_sliders.append(slider)
+            byte_row.addLayout(col_wrap)
+        byte_row.addStretch()
+        root.addLayout(byte_row)
+
+        # ── bit grid ──────────────────────────────────────────────────────
+        grid_lbl = QLabel("Bit Layout")
+        grid_lbl.setStyleSheet("font-weight:600; color:#c9d1d9; font-size:12px;")
+        root.addWidget(grid_lbl)
+        self._bit_grid = BitGridWidget()
+        root.addWidget(self._bit_grid)
+
+        # ── decoded signal table ───────────────────────────────────────────
+        self._table = QTableWidget(0, len(self._COLS))
+        self._table.setHorizontalHeaderLabels(self._COLS)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.verticalHeader().setVisible(False)
+        root.addWidget(self._table, stretch=1)
+
+        # wire focus → show matching slider
+        for i, edit in enumerate(self._byte_edits):
+            edit.focusInEvent = self._make_focus_in(i, edit.focusInEvent)
+
+    # ── helpers ───────────────────────────────────────────────────────────
+
+    def _make_focus_in(self, idx: int, original):
+        def handler(event):
+            for j, sl in enumerate(self._byte_sliders):
+                sl.setVisible(j == idx)
+            original(event)
+        return handler
+
+    def _make_slider_handler(self, idx: int):
+        def handler(val: int) -> None:
+            if not self._guard:
+                self._guard = True
+                self._byte_edits[idx].setText(f"{val:02X}")
+                self._guard = False
+        return handler
+
+    def _on_msg_changed(self, idx: int) -> None:
+        self._msg = self._msg_combo.itemData(idx)
+        self._bit_grid.load_message(self._msg)
+        self._clear_table()
+        self._decode()
+
+    def _on_byte_changed(self) -> None:
+        if not self._guard:
+            self._decode()
+
+    def _get_bytes(self) -> bytes:
+        raw: list[int] = []
+        for edit in self._byte_edits:
+            text = edit.text().strip() or "00"
+            try:
+                raw.append(int(text, 16) & 0xFF)
+            except ValueError:
+                raw.append(0)
+        return bytes(raw)
+
+    def _decode(self) -> None:
+        if self._msg is None:
+            return
+        length = self._msg.length
+        data = self._get_bytes()[:length]
+        data = data + bytes(length - len(data))
+        try:
+            decoded = self._msg.decode(data, decode_choices=False)
+        except Exception:
+            return
+        self._refresh_table(decoded)
+        self._bit_grid.set_bytes(data)
+
+    def _refresh_table(self, decoded: dict) -> None:
+        self._table.setSortingEnabled(False)
+        sigs = sorted(self._msg.signals, key=lambda s: s.name)
+        self._table.setRowCount(len(sigs))
+        for row, sig in enumerate(sigs):
+            phys = decoded.get(sig.name)
+            raw_int = None
+            if isinstance(phys, (int, float)):
+                scale = float(getattr(sig, "scale", 1) or 1)
+                offset = float(getattr(sig, "offset", 0) or 0)
+                if scale:
+                    raw_int = int(round((float(phys) - offset) / scale))
+            raw_str = f"0x{raw_int:X}" if raw_int is not None else "\u2014"
+            phys_str = (
+                f"{phys:.4g}" if isinstance(phys, (int, float))
+                else (str(phys) if phys is not None else "\u2014")
+            )
+            unit_str = getattr(sig, "unit", "") or ""
+            min_val = sig.minimum
+            max_val = sig.maximum
+            min_str = str(min_val) if min_val is not None else "\u2014"
+            max_str = str(max_val) if max_val is not None else "\u2014"
+            in_range = True
+            if isinstance(phys, (int, float)):
+                if min_val is not None and phys < min_val:
+                    in_range = False
+                if max_val is not None and phys > max_val:
+                    in_range = False
+            range_text = "\u2713" if in_range else "\u2717"
+            range_bg = "#1a3a1a" if in_range else "#3a1a1a"
+            range_fg = "#2ea043" if in_range else "#ff453a"
+            for col, val in enumerate(
+                [sig.name, raw_str, phys_str, unit_str, min_str, max_str, range_text]
+            ):
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                if col == 6:
+                    it.setBackground(QColor(range_bg))
+                    it.setForeground(QColor(range_fg))
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table.setItem(row, col, it)
+        self._table.setSortingEnabled(True)
+        self._table.resizeColumnsToContents()
+
+    def _clear_table(self) -> None:
+        self._table.setRowCount(0)
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -2099,192 +2912,374 @@ class ViewerDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("dbcdiff  |  DBC Diff Analyzer")
-        self.setMinimumSize(1100, 700)
+        self.setWindowTitle("dbcdiff")
+        self.setMinimumSize(1380, 860)
         self._entries: list[DiffEntry] = []
-        self._dark_theme = True
+        self._consistency_records: list[dict] = []
+        self._active_severities = {
+            Severity.BREAKING.name,
+            Severity.FUNCTIONAL.name,
+            Severity.METADATA.name,
+        }
+        self._current_view_idx = 0
+        self._db_a = None
+        self._db_b = None
 
-        # ── central widget ──────────────────────────────────────────────────
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(16, 12, 16, 8)
-        root.setSpacing(10)
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
 
-        # ── top bar ─────────────────────────────────────────────────────────
-        top_bar = QHBoxLayout()
-        title = QLabel("🔀  DBC Diff Analyzer")
-        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #58a6ff;")
-        top_bar.addWidget(title)
-        top_bar.addStretch()
-
-        # theme toggle button
-        self._theme_btn = QPushButton("☀  Light")
-        self._theme_btn.setFixedWidth(100)
-        self._theme_btn.setToolTip("Switch to light theme")
-        self._theme_btn.clicked.connect(self._toggle_theme)
-        top_bar.addWidget(self._theme_btn)
-        root.addLayout(top_bar)
-
-        # ── drop zones ───────────────────────────────────────────────────────
-        drop_row = QHBoxLayout()
-        drop_row.setSpacing(12)
-        self._drop_a = DBCDropZone("Drop Base DBC here\nor click Browse…")
-        self._drop_b = DBCDropZone("Drop Compare DBC here\nor click Browse…")
+        self._drop_a = DBCDropZone("Base DBC")
+        self._drop_b = DBCDropZone("Compare DBC")
         self._drop_a.file_chosen.connect(self._on_file_chosen)
         self._drop_b.file_chosen.connect(self._on_file_chosen)
 
-        drop_row.addWidget(self._drop_a)
-        vs = QLabel("VS")
-        vs.setAlignment(Qt.AlignCenter)
-        vs.setStyleSheet("font-size: 18px; font-weight: 700; color: #8b949e; min-width: 30px;")
-        drop_row.addWidget(vs)
-        drop_row.addWidget(self._drop_b)
-        root.addLayout(drop_row)
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(220)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(18, 18, 18, 18)
+        side.setSpacing(14)
 
-        # ── compare + visualize buttons ──────────────────────────────────────
-        self._compare_btn = QPushButton("⚡  Compare Files")
-        self._compare_btn.setObjectName("primary")
+        logo = QFrame()
+        logo.setObjectName("logoBlock")
+        logo_layout = QVBoxLayout(logo)
+        logo_layout.setContentsMargins(16, 16, 16, 16)
+        logo_layout.setSpacing(8)
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        mark = QLabel("db")
+        mark.setObjectName("logoMark")
+        brand_col = QVBoxLayout()
+        brand_col.setSpacing(2)
+        title = QLabel("dbcdiff")
+        title.setObjectName("logoTitle")
+        subtitle = QLabel("CAN database diff")
+        subtitle.setObjectName("logoSubtitle")
+        version = QLabel(f"v{__version__}")
+        version.setObjectName("logoVersion")
+        brand_col.addWidget(title)
+        brand_col.addWidget(subtitle)
+        brand_row.addWidget(mark)
+        brand_row.addLayout(brand_col, 1)
+        brand_row.addWidget(version, alignment=Qt.AlignmentFlag.AlignTop)
+        logo_layout.addLayout(brand_row)
+        side.addWidget(logo)
+
+        mode_label = QLabel("Mode")
+        mode_label.setObjectName("sectionLabel")
+        side.addWidget(mode_label)
+        self._mode_buttons: dict[str, QPushButton] = {}
+        self._mode_stack = QStackedWidget()
+        for idx, (key, text) in enumerate([
+            ("compare", "Compare"),
+            ("visualize", "Visualize"),
+            ("sim", "3D Sim"),
+            ("decode", "Decode"),
+        ]):
+            btn = QPushButton(text)
+            btn.setObjectName("modeButton")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _checked, mode=key: self._set_mode(mode))
+            self._mode_buttons[key] = btn
+            side.addWidget(btn)
+        self._mode_buttons["compare"].setChecked(True)
+
+        views_label = QLabel("Views")
+        views_label.setObjectName("sectionLabel")
+        side.addWidget(views_label)
+        self._view_buttons: list[QPushButton] = []
+        for idx, (name, dot_color, _) in enumerate(_VIEWS):
+            pix = QPixmap(8, 8)
+            pix.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QColor(dot_color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(0, 0, 8, 8)
+            p.end()
+            btn = QPushButton(name)
+            btn.setObjectName("viewButton")
+            btn.setIcon(QIcon(pix))
+            btn.setIconSize(QSize(8, 8))
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _checked, view_idx=idx: self._set_view(view_idx))
+            self._view_buttons.append(btn)
+            side.addWidget(btn)
+        if self._view_buttons:
+            self._view_buttons[0].setChecked(True)
+
+        side.addStretch()
+
+        load_base_btn = QPushButton("Load Base DBC")
+        load_base_btn.setObjectName("ghostButton")
+        load_base_btn.clicked.connect(self._drop_a._browse)
+        side.addWidget(load_base_btn)
+
+        load_compare_btn = QPushButton("Load Compare DBC")
+        load_compare_btn.setObjectName("ghostButton")
+        load_compare_btn.clicked.connect(self._drop_b._browse)
+        side.addWidget(load_compare_btn)
+
+        self._compare_btn = QPushButton("Compare Files")
+        self._compare_btn.setObjectName("compareCta")
         self._compare_btn.setEnabled(False)
-        self._compare_btn.setFixedHeight(38)
         self._compare_btn.clicked.connect(self._on_compare)
-        self._visualize_btn = QPushButton("🔍  Visualize File")
-        self._visualize_btn.setEnabled(False)
-        self._visualize_btn.setFixedHeight(38)
-        self._visualize_btn.clicked.connect(self._on_visualize)
-        _btn_row = QHBoxLayout()
-        _btn_row.addWidget(self._compare_btn, stretch=3)
-        _btn_row.addWidget(self._visualize_btn, stretch=1)
-        root.addLayout(_btn_row)
+        side.addWidget(self._compare_btn)
 
-        # ── summary row ──────────────────────────────────────────────────────
-        summary_card = QFrame()
-        summary_card.setObjectName("card")
-        summary_layout = QHBoxLayout(summary_card)
-        summary_layout.setContentsMargins(12, 10, 12, 10)
-        self._summary = SummaryBadge()
-        summary_layout.addWidget(self._summary)
-        root.addWidget(summary_card)
+        pills_label = QLabel("Files")
+        pills_label.setObjectName("sectionLabel")
+        side.addWidget(pills_label)
+        self._base_file_pill, self._base_file_text = self._create_file_pill("File A", "Choose a source DBC", "NEW")
+        self._compare_file_pill, self._compare_file_text = self._create_file_pill("File B", "Choose a target DBC", "OLD")
+        side.addWidget(self._base_file_pill)
+        side.addWidget(self._compare_file_pill)
 
-        # ── filter + param-dropdown row ──────────────────────────────────────
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(8)
+        shell.addWidget(sidebar)
 
-        sev_lbl = QLabel("Severity:")
-        sev_lbl.setStyleSheet("color: #8b949e; font-size: 12px;")
-        filter_row.addWidget(sev_lbl)
+        main_wrap = QWidget()
+        main = QVBoxLayout(main_wrap)
+        main.setContentsMargins(18, 18, 18, 10)
+        main.setSpacing(14)
 
-        self._filter_btns: dict[str, QPushButton] = {}
-        for key, label in [
-            ("ALL",        "All"),
-            ("BREAKING",   "Critical"),
-            ("FUNCTIONAL", "Major"),
-            ("METADATA",   "Minor"),
+        topbar = QFrame()
+        topbar.setObjectName("topbar")
+        topbar_layout = QHBoxLayout(topbar)
+        topbar_layout.setContentsMargins(18, 12, 18, 12)
+        topbar_layout.setSpacing(12)
+
+        title_block = QVBoxLayout()
+        title_block.setSpacing(2)
+        self._page_title = QLabel("Diff Report")
+        self._page_title.setObjectName("pageTitle")
+        self._page_subtitle = QLabel("Choose two DBC files to compare messages, signals, nodes, and consistency rules.")
+        self._page_subtitle.setObjectName("pageSubtitle")
+        title_block.addWidget(self._page_title)
+        title_block.addWidget(self._page_subtitle)
+        topbar_layout.addLayout(title_block)
+        topbar_layout.addStretch()
+
+        self._sev_chips: dict[str, QLabel] = {}
+        for sev_name, label, icon_emoji, obj_name in [
+            (Severity.BREAKING.name,   "Breaking",   "🔴", "chipBreaking"),
+            (Severity.FUNCTIONAL.name, "Functional", "🟠", "chipFunctional"),
+            ("added",                  "Added",       "🟢", "chipAdded"),
+            (Severity.METADATA.name,   "Metadata",    "🔵", "chipMetadata"),
+        ]:
+            chip = QLabel(f"{icon_emoji} 0 {label}")
+            chip.setObjectName(obj_name)
+            self._sev_chips[sev_name] = chip
+            topbar_layout.addWidget(chip)
+
+        for label, handler, obj_name in [
+            ("Export HTML", self._export_html, "exportButton"),
+            ("Export CSV",  self._export_csv,  "exportButtonPrimary"),
         ]:
             btn = QPushButton(label)
-            btn.setFixedHeight(28)
-            btn.setCheckable(False)
-            btn.setProperty("filter_key", key)
-            btn.clicked.connect(self._on_filter_btn)
-            self._filter_btns[key] = btn
-            filter_row.addWidget(btn)
+            btn.setObjectName(obj_name)
+            btn.clicked.connect(handler)
+            topbar_layout.addWidget(btn)
+        main.addWidget(topbar)
 
-        # mark "All" active initially
-        self._current_filter = "ALL"
-        self._filter_btns["ALL"].setObjectName("active_filter")
+        summary_card = QFrame()
+        summary_card.setObjectName("summaryWrap")
+        summary_layout = QHBoxLayout(summary_card)
+        summary_layout.setContentsMargins(12, 12, 12, 12)
+        self._summary = SummaryBadge()
+        summary_layout.addWidget(self._summary)
+        main.addWidget(summary_card)
 
-        filter_row.addSpacing(20)
+        filter_bar = QFrame()
+        filter_bar.setObjectName("filterBar")
+        filter_row = QHBoxLayout(filter_bar)
+        filter_row.setContentsMargins(14, 12, 14, 12)
+        filter_row.setSpacing(10)
 
-        # param column selector
-        param_lbl = QLabel("Filter by:")
-        param_lbl.setStyleSheet("color: #8b949e; font-size: 12px;")
-        filter_row.addWidget(param_lbl)
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Search path, detail, values…")
+        self._search_input.textChanged.connect(self._refresh_all_tabs)
+        filter_row.addWidget(self._search_input, 2)
 
-        self._param_combo = QComboBox()
-        self._param_combo.setFixedWidth(130)
-        self._param_combo.addItem("(none)", None)
-        for i, col in enumerate(_COLUMNS):
-            self._param_combo.addItem(col, i)
-        self._param_combo.currentIndexChanged.connect(self._on_param_col_changed)
-        filter_row.addWidget(self._param_combo)
+        self._protocol_combo = QComboBox()
+        self._protocol_combo.setFixedWidth(120)
+        self._protocol_combo.addItem("(all)")
+        self._protocol_combo.currentTextChanged.connect(self._refresh_all_tabs)
+        filter_row.addWidget(self._protocol_combo)
 
-        self._param_value_combo = QComboBox()
-        self._param_value_combo.setFixedWidth(180)
-        self._param_value_combo.setEditable(True)
-        self._param_value_combo.addItem("(all)")
-        self._param_value_combo.currentTextChanged.connect(self._on_param_value_changed)
-        filter_row.addWidget(self._param_value_combo)
+        self._ecu_combo = QComboBox()
+        self._ecu_combo.setFixedWidth(140)
+        self._ecu_combo.addItem("(all)")
+        self._ecu_combo.currentTextChanged.connect(self._refresh_all_tabs)
+        filter_row.addWidget(self._ecu_combo)
 
-        filter_row.addStretch()
-        root.addLayout(filter_row)
+        self._msg_type_combo = QComboBox()
+        self._msg_type_combo.setFixedWidth(150)
+        self._msg_type_combo.addItem("(all)")
+        self._msg_type_combo.currentTextChanged.connect(self._on_msg_type_changed)
+        filter_row.addWidget(self._msg_type_combo)
 
-        # ── tab widget (views) ───────────────────────────────────────────────
-        self._tabs = QTabWidget()
+        self._sort_combo = QComboBox()
+        self._sort_combo.setFixedWidth(160)
+        for label in [
+            "Severity → Path",
+            "Kind → Path",
+            "Entity → Path",
+            "Path A→Z",
+            "Path Z→A",
+        ]:
+            self._sort_combo.addItem(label)
+        self._sort_combo.currentTextChanged.connect(self._refresh_all_tabs)
+        filter_row.addWidget(self._sort_combo)
+        main.addWidget(filter_bar)
+
+        compare_page = QWidget()
+        compare_vbox = QVBoxLayout(compare_page)
+        compare_vbox.setContentsMargins(0, 0, 0, 0)
+        compare_vbox.setSpacing(14)
+
+        drop_row = QWidget()
+        drop_hl = QHBoxLayout(drop_row)
+        drop_hl.setContentsMargins(0, 0, 0, 0)
+        drop_hl.setSpacing(14)
+        drop_hl.addWidget(self._drop_a)
+        drop_hl.addWidget(self._drop_b)
+        compare_vbox.addWidget(drop_row)
+
+        results_area = QWidget()
+        compare_layout = QHBoxLayout(results_area)
+        compare_layout.setContentsMargins(0, 0, 0, 0)
+        compare_layout.setSpacing(14)
+
+        table_panel = QFrame()
+        table_panel.setObjectName("tablePanel")
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(10, 10, 10, 10)
+        table_layout.setSpacing(10)
+
+        self._view_stack = QStackedWidget()
         self._view_tables: list[ResultsTable] = []
-        for name, icon, _ in _VIEWS:
+        for name, dot_color, _ in _VIEWS:
             tbl = ResultsTable()
             self._view_tables.append(tbl)
-            self._tabs.addTab(tbl, f"{icon}  {name}")
+            self._view_stack.addWidget(tbl)
 
-        # ── wrap Nodes tab in QStackedWidget (diff view + inventory view) ────
-        _NODES_IDX = next(i for i, (n, _, _) in enumerate(_VIEWS) if n == "Nodes")
-        _node_icon = _VIEWS[_NODES_IDX][1]
+        _NODES_IDX = next(i for i, (n, _, _) in enumerate(_VIEWS) if "Nodes" in n)
         _node_diff_tbl = self._view_tables[_NODES_IDX]
-        self._node_inv_tbl = QTableWidget(0, 4)
+        self._node_inv_tbl = QTableWidget(0, 5)
         self._node_inv_tbl.setHorizontalHeaderLabels(
-            ["Name", "Comment", "TX Messages", "RX Signals"]
+            ["Name", "Comment", "TX Messages", "RX Signals", "Status"]
         )
         self._node_inv_tbl.horizontalHeader().setStretchLastSection(True)
         self._node_inv_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._node_inv_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._node_inv_tbl.setAlternatingRowColors(True)
         self._node_stack = QStackedWidget()
-        self._node_stack.addWidget(_node_diff_tbl)      # page 0: diff
-        self._node_stack.addWidget(self._node_inv_tbl)  # page 1: inventory
-        self._tabs.removeTab(_NODES_IDX)
-        self._tabs.insertTab(_NODES_IDX, self._node_stack, f"{_node_icon}  Nodes")
+        self._node_stack.addWidget(_node_diff_tbl)
+        self._node_stack.addWidget(self._node_inv_tbl)
+        self._view_stack.removeWidget(_node_diff_tbl)
+        self._view_stack.insertWidget(_NODES_IDX, self._node_stack)
 
-        # ── converter tab ────────────────────────────────────────────────────
-        self._converter_tab = ConverterWidget()
-        self._tabs.addTab(self._converter_tab, "🔄  Converter")
-
-        self._tabs.currentChanged.connect(self._on_tab_changed)
-
-        # Wire row-selection in every results table to the detail panel
         for _ti, _t in enumerate(self._view_tables):
             _t.currentItemChanged.connect(
                 lambda cur, prev, ti=_ti: self._on_row_selected(ti)
             )
 
-        # Detail / synopsis panel – sits below the results tabs in a splitter
-        self._detail = _DetailPanel()
-        _splitter = QSplitter(Qt.Orientation.Vertical)
-        _splitter.addWidget(self._tabs)
-        _splitter.addWidget(self._detail)
-        _splitter.setStretchFactor(0, 3)
-        _splitter.setStretchFactor(1, 1)
-        _splitter.setChildrenCollapsible(False)
-        root.addWidget(_splitter, stretch=1)
+        table_layout.addWidget(self._view_stack)
+        compare_layout.addWidget(table_panel, 1)
 
-        # ── status bar ───────────────────────────────────────────────────────
+        self._detail = _DetailPanel()
+        compare_layout.addWidget(self._detail)
+        compare_vbox.addWidget(results_area, 1)
+
+        self._mode_stack.addWidget(compare_page)
+        self._mode_stack.addWidget(self._build_mode_page(
+            "Visualize One DBC",
+            "Open the structure viewer for the currently loaded base or compare file.",
+            "Open Viewer",
+            self._on_visualize,
+        ))
+        self._three_sim = ThreeSimWidget()
+        self._mode_stack.addWidget(self._three_sim)
+        self._decoder_tab = DecoderTab()
+        self._mode_stack.addWidget(self._decoder_tab)  # index 3
+        main.addWidget(self._mode_stack, 1)
+
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Ready — drop two DBC files to compare")
 
-        # worker
         self._thread: Optional[QThread] = None
         self._worker: Optional[_Worker] = None
-        self._db_a = None
-        self._db_b = None
+        self._update_sev_chips()
+        self._refresh_header_state()
+        shell.addWidget(main_wrap, 1)
 
-    # -----------------------------------------------------------------------
-    # File selection
-    # -----------------------------------------------------------------------
+    def _create_file_pill(self, title: str, text: str, badge_text: str) -> tuple[QFrame, QLabel]:
+        frame = QFrame()
+        frame.setObjectName("filePill")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        cap = QLabel(title)
+        cap.setObjectName("pillCaption")
+        badge = QLabel(badge_text)
+        badge.setObjectName(f"filePillBadge{badge_text.capitalize()}")
+        value = QLabel(text)
+        value.setWordWrap(True)
+        value.setObjectName("filePillValue")
+        row.addWidget(cap)
+        row.addStretch()
+        row.addWidget(badge)
+        layout.addLayout(row)
+        layout.addWidget(value)
+        return frame, value
+
+    def _build_mode_page(self, title: str, copy: str, cta: str, slot) -> QWidget:
+        page = QFrame()
+        page.setObjectName("modePageCard")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+        lead = QLabel(title)
+        lead.setObjectName("pageTitle")
+        text = QLabel(copy)
+        text.setWordWrap(True)
+        text.setObjectName("modeCopy")
+        btn = QPushButton(cta)
+        btn.setObjectName("compareCta")
+        btn.clicked.connect(slot)
+        layout.addStretch()
+        layout.addWidget(lead)
+        layout.addWidget(text)
+        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
+        return page
+
+    def _set_mode(self, mode: str) -> None:
+        mode_map = {"compare": 0, "visualize": 1, "sim": 2, "decode": 3}
+        for key, btn in self._mode_buttons.items():
+            btn.setChecked(key == mode)
+        self._mode_stack.setCurrentIndex(mode_map[mode])
+        self._refresh_header_state()
+
+    def _set_view(self, view_idx: int) -> None:
+        self._current_view_idx = view_idx
+        for idx, btn in enumerate(self._view_buttons):
+            btn.setChecked(idx == view_idx)
+        self._view_stack.setCurrentIndex(view_idx)
+        self._refresh_table()
 
     def _on_file_chosen(self, _path: str):
         ready = self._drop_a.path and self._drop_b.path
         self._compare_btn.setEnabled(bool(ready))
-        self._visualize_btn.setEnabled(bool(self._drop_a.path or self._drop_b.path))
+        self._base_file_text.setText(Path(self._drop_a.path).name if self._drop_a.path else "Choose a source DBC")
+        self._compare_file_text.setText(Path(self._drop_b.path).name if self._drop_b.path else "Choose a target DBC")
+        self._refresh_header_state()
         if ready:
             self._status.showMessage(f"Ready: {Path(self._drop_a.path).name}  ↔  {Path(self._drop_b.path).name}")
 
@@ -2314,16 +3309,18 @@ class MainWindow(QMainWindow):
         self._entries = entries
         self._db_a = db_a
         self._db_b = db_b
+        self._consistency_records = self._build_consistency_records(db_a, db_b)
         self._detail.set_databases(db_a, db_b)
+        self._decoder_tab.set_database(db_b or db_a)
+        try:
+            self._three_sim.load(db_b or db_a, entries, "diff")
+        except Exception:  # pylint: disable=broad-except
+            import traceback as _tb; _tb.print_exc()
         self._compare_btn.setEnabled(True)
         self._summary.update(entries)
+        self._update_sev_chips()
         self._refresh_all_tabs()
-        # ── node tab: show diff or inventory fallback ─────────────────────────
-        if any(e.entity == "node" for e in entries):
-            self._node_stack.setCurrentIndex(0)   # diff table
-        else:
-            self._populate_node_inventory(db_a, db_b)
-            self._node_stack.setCurrentIndex(1)   # inventory table
+        self._refresh_header_state(compared=True)
         worst = max((e.severity for e in entries), default=None)
         if entries:
             worst_label = _sev_display(worst) if worst else "None"
@@ -2332,36 +3329,43 @@ class MainWindow(QMainWindow):
             )
         else:
             self._status.showMessage("✅  No differences — files are identical")
-        self._update_param_value_list(self._param_combo.currentIndex())
+        self._update_msg_type_list()
+        self._update_protocol_list()
+        self._update_ecu_node_list()
 
     def _on_compare_error(self, msg: str):
         self._compare_btn.setEnabled(True)
+        self._refresh_header_state()
         self._status.showMessage(f"❌  Error: {msg}")
         QMessageBox.critical(self, "Compare Error", msg)
 
-    def _populate_node_inventory(self, db_a, db_b) -> None:
+    def _populate_node_inventory(self, db_a) -> None:
         """Fill the static node inventory table (shown when no node diffs exist)."""
-        db = db_b or db_a
-        if db is None:
+        tbl = self._node_inv_tbl
+        tbl.clearContents()
+        tbl.setRowCount(0)
+
+        if db_a is None:
             return
-        nodes = sorted(db.nodes or [], key=lambda n: n.name)
+
+        nodes = sorted(db_a.nodes or [], key=lambda n: n.name)
         node_tx: dict[str, list[str]] = {}
-        for msg in db.messages:
+        for msg in db_a.messages:
             for sender in (msg.senders or []):
                 node_tx.setdefault(sender, []).append(msg.name)
         node_rx: dict[str, int] = {}
-        for msg in db.messages:
+        for msg in db_a.messages:
             for sig in msg.signals:
                 for recv in (sig.receivers or []):
                     node_rx[recv] = node_rx.get(recv, 0) + 1
-        tbl = self._node_inv_tbl
         tbl.setRowCount(len(nodes))
         for row, node in enumerate(nodes):
             for col, val in enumerate([
                 node.name,
-                node.comment or "",
+                node.comment or "—",
                 str(len(node_tx.get(node.name, []))),
                 str(node_rx.get(node.name, 0)),
+                "Same in both files",
             ]):
                 it = QTableWidgetItem(val)
                 it.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
@@ -2371,7 +3375,6 @@ class MainWindow(QMainWindow):
         tbl.resizeColumnsToContents()
 
     def _on_visualize(self) -> None:
-        """Open the single-file viewer dialog for the most recently loaded file."""
         path = self._drop_b.path or self._drop_a.path
         if not path:
             return
@@ -2380,107 +3383,284 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pylint: disable=broad-except
             QMessageBox.critical(self, "Load Error", str(exc))
             return
+        try:
+            self._three_sim.load(db, [], "viewer")
+        except Exception:  # pylint: disable=broad-except
+            import traceback as _tb; _tb.print_exc()
         dlg = ViewerDialog(db, Path(path).name, self)
         dlg.exec()
 
-    # -----------------------------------------------------------------------
-    # Filter helpers
-    # -----------------------------------------------------------------------
+    def _update_sev_chips(self) -> None:
+        counts: dict[str, int] = {
+            Severity.BREAKING.name:   0,
+            Severity.FUNCTIONAL.name: 0,
+            "added":                  0,
+            Severity.METADATA.name:   0,
+        }
+        for entry in self._entries:
+            if entry.severity.name in counts:
+                counts[entry.severity.name] += 1
+            if entry.value_a is None and entry.value_b is not None:
+                counts["added"] += 1
+        labels = {
+            Severity.BREAKING.name:   ("\U0001f534", "Breaking"),
+            Severity.FUNCTIONAL.name: ("\U0001f7e0", "Functional"),
+            "added":                  ("\U0001f7e2", "Added"),
+            Severity.METADATA.name:   ("\U0001f535", "Metadata"),
+        }
+        for sev_name, chip in self._sev_chips.items():
+            icon_emoji, label = labels[sev_name]
+            chip.setText(f"{icon_emoji} {counts.get(sev_name, 0)} {label}")
 
-    def _get_param_col(self) -> Optional[int]:
-        idx = self._param_combo.currentIndex()
-        data = self._param_combo.itemData(idx)
-        return data  # None if "(none)" selected
+    def _refresh_header_state(self, compared: bool = False) -> None:
+        current_mode = self._mode_stack.currentIndex()
+        if current_mode == 1:
+            self._page_title.setText("DBC Viewer")
+            current_path = self._drop_b.path or self._drop_a.path
+            self._page_subtitle.setText(
+                Path(current_path).name if current_path else "Open one DBC file to inspect its structure."
+            )
+            return
+        if current_mode == 2:
+            self._page_title.setText("Simulation Preview")
+            self._page_subtitle.setText("Reserved for future playback and geometry inspection workflows.")
+            return
 
-    def _get_param_value(self) -> str:
-        return self._param_value_combo.currentText().strip()
+        if current_mode == 3:
+            self._page_title.setText("Decoder")
+            self._page_subtitle.setText(
+                "Select a message and enter hex bytes to decode signal values live."
+            )
+            return
+
+        self._page_title.setText("Diff Report")
+        if self._drop_a.path and self._drop_b.path:
+            file_a = Path(self._drop_a.path).name
+            file_b = Path(self._drop_b.path).name
+            self._page_subtitle.setText(
+                f"{file_a} → {file_b}" if compared else f"Ready to compare {file_a} and {file_b}"
+            )
+        else:
+            self._page_subtitle.setText("Choose two DBC files to compare messages, signals, nodes, and consistency rules.")
+
+    def _get_msg_type_value(self) -> str:
+        return self._msg_type_combo.currentText().strip()
+
+    def _get_protocol_value(self) -> str:
+        return self._protocol_combo.currentText().strip()
+
+    def _get_ecu_value(self) -> str:
+        return self._ecu_combo.currentText().strip()
+
+    def _matches_search(self, entry: DiffEntry) -> bool:
+        needle = self._search_input.text().strip().lower()
+        if not needle:
+            return True
+        haystack = " | ".join([
+            entry.entity or "",
+            entry.kind or "",
+            entry.path or "",
+            entry.msg_type or "",
+            entry.protocol or "",
+            entry.detail or "",
+            str(entry.value_a) if entry.value_a is not None else "",
+            str(entry.value_b) if entry.value_b is not None else "",
+        ]).lower()
+        return needle in haystack
+
+    def _entry_message_name(self, entry: DiffEntry) -> str:
+        path = entry.path or ""
+        if path.startswith("message."):
+            return path.split(".", 1)[1].split("(", 1)[0]
+        return path.split(".", 1)[0]
+
+    def _entry_matches_ecu(self, entry: DiffEntry, ecu_name: str) -> bool:
+        if ecu_name in ("", "(all)"):
+            return True
+        if entry.entity == "node":
+            return ecu_name.lower() in (entry.path or "").lower()
+
+        msg_name = self._entry_message_name(entry)
+        for db in (self._db_a, self._db_b):
+            if db is None:
+                continue
+            try:
+                message = db.get_message_by_name(msg_name)
+            except Exception:
+                continue
+            senders = set(message.senders or [])
+            receivers = set()
+            for signal in getattr(message, "signals", []):
+                receivers.update(getattr(signal, "receivers", None) or [])
+            if ecu_name in senders or ecu_name in receivers:
+                return True
+        return False
+
+    def _sorted_entries(self, entries: list[DiffEntry]) -> list[DiffEntry]:
+        mode = self._sort_combo.currentText()
+        sev_rank = {
+            Severity.BREAKING: 0,
+            Severity.FUNCTIONAL: 1,
+            Severity.METADATA: 2,
+        }
+        if mode == "Kind → Path":
+            return sorted(entries, key=lambda e: (e.kind, e.path))
+        if mode == "Entity → Path":
+            return sorted(entries, key=lambda e: (e.entity, e.path))
+        if mode == "Path Z→A":
+            return sorted(entries, key=lambda e: e.path, reverse=True)
+        if mode == "Path A→Z":
+            return sorted(entries, key=lambda e: e.path)
+        return sorted(entries, key=lambda e: (sev_rank.get(e.severity, 99), e.path))
+
+    def _build_consistency_records(self, db_a, db_b) -> list[dict]:
+        records: list[dict] = []
+        for source, db in (("A", db_a), ("B", db_b)):
+            if db is None:
+                continue
+            for issue in check_consistency(db):
+                records.append({"source": source, "issue": issue})
+        records.sort(
+            key=lambda record: (
+                {"ERROR": 0, "WARNING": 1, "INFO": 2}.get(record["issue"].level, 3),
+                record["issue"].rule_id,
+                record["source"],
+                record["issue"].message_name,
+                record["issue"].signal_name,
+            )
+        )
+        return records
+
+    def _filtered_entries(self, entity_set: Optional[set[str]]) -> list[DiffEntry]:
+        filtered: list[DiffEntry] = []
+        protocol_filter = self._get_protocol_value()
+        msg_type_filter = self._get_msg_type_value()
+        ecu_filter = self._get_ecu_value()
+
+        for entry in self._entries:
+            if entity_set is not None:
+                if "__BREAKING__" in entity_set:
+                    if entry.severity.name != Severity.BREAKING.name:
+                        continue
+                elif entry.entity not in entity_set:
+                    continue
+            if protocol_filter not in ("", "(all)") and (entry.protocol or "RAW") != protocol_filter:
+                continue
+            if msg_type_filter not in ("", "(all)") and entry.msg_type != msg_type_filter:
+                continue
+            if not self._entry_matches_ecu(entry, ecu_filter):
+                continue
+            if not self._matches_search(entry):
+                continue
+            filtered.append(entry)
+        return self._sorted_entries(filtered)
 
     def _refresh_table(self):
-        """Re-populate the currently visible tab."""
-        idx = self._tabs.currentIndex()
-        if 0 <= idx < len(_VIEWS) and 0 <= idx < len(self._view_tables):
-            _, _, entity_set = _VIEWS[idx]
-            tbl = self._view_tables[idx]
-            tbl.populate(
-                self._entries,
-                severity_filter=self._current_filter,
-                entity_set=entity_set,
-                param_col=self._get_param_col(),
-                param_value=self._get_param_value(),
-            )
+        if 0 <= self._current_view_idx < len(_VIEWS) and 0 <= self._current_view_idx < len(self._view_tables):
+            _, _, entity_set = _VIEWS[self._current_view_idx]
+            self._view_tables[self._current_view_idx].populate(self._filtered_entries(entity_set))
 
     def _refresh_all_tabs(self):
-        """Populate every tab."""
         for tab_idx, (_, _, entity_set) in enumerate(_VIEWS):
             if tab_idx < len(self._view_tables):
-                self._view_tables[tab_idx].populate(
-                    self._entries,
-                    severity_filter=self._current_filter,
-                    entity_set=entity_set,
-                    param_col=self._get_param_col(),
-                    param_value=self._get_param_value(),
-                )
+                self._view_tables[tab_idx].populate(self._filtered_entries(entity_set))
 
-    def _update_param_value_list(self, combo_idx: int):
-        """Populate the param-value combo with distinct values for selected column."""
-        col = self._param_combo.itemData(combo_idx)
-        self._param_value_combo.blockSignals(True)
-        self._param_value_combo.clear()
-        self._param_value_combo.addItem("(all)")
-        if col is not None and self._entries:
-            seen: set[str] = set()
-            for e in self._entries:
-                val = ResultsTable._entry_col_text(e, col)
-                if val and val not in seen:
-                    seen.add(val)
-                    self._param_value_combo.addItem(val)
-        self._param_value_combo.blockSignals(False)
+        nodes_idx = next(i for i, (name, _, _) in enumerate(_VIEWS) if "Nodes" in name)
+        if nodes_idx < len(self._view_tables) and self._view_tables[nodes_idx].rowCount() == 0:
+            self._populate_node_inventory(self._db_a)
+            self._node_stack.setCurrentIndex(1)
+        else:
+            self._node_stack.setCurrentIndex(0)
 
-    # -----------------------------------------------------------------------
-    # Slots
-    # -----------------------------------------------------------------------
+    def _update_protocol_list(self):
+        current = self._protocol_combo.currentText().strip()
+        values = sorted({(e.protocol or "RAW") for e in self._entries})
+        self._protocol_combo.blockSignals(True)
+        self._protocol_combo.clear()
+        self._protocol_combo.addItem("(all)")
+        for value in values:
+            self._protocol_combo.addItem(value)
+        idx = self._protocol_combo.findText(current)
+        self._protocol_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._protocol_combo.blockSignals(False)
 
-    def _on_filter_btn(self):
-        btn = self.sender()
-        key = btn.property("filter_key")
-        self._current_filter = key
-        # update button styles
-        for k, b in self._filter_btns.items():
-            if k == key:
-                b.setObjectName("active_filter")
-            else:
-                b.setObjectName("")
-            b.style().unpolish(b)
-            b.style().polish(b)
-        self._refresh_all_tabs()
+    def _update_ecu_node_list(self):
+        current = self._ecu_combo.currentText().strip()
+        values: set[str] = set()
+        for db in (self._db_a, self._db_b):
+            if db is None:
+                continue
+            for node in getattr(db, "nodes", []) or []:
+                values.add(node.name)
+            for message in getattr(db, "messages", []) or []:
+                values.update(message.senders or [])
+                for signal in getattr(message, "signals", []) or []:
+                    values.update(getattr(signal, "receivers", None) or [])
+        self._ecu_combo.blockSignals(True)
+        self._ecu_combo.clear()
+        self._ecu_combo.addItem("(all)")
+        for value in sorted(values):
+            self._ecu_combo.addItem(value)
+        idx = self._ecu_combo.findText(current)
+        self._ecu_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._ecu_combo.blockSignals(False)
 
-    def _on_tab_changed(self, idx: int):
-        self._refresh_table()
+    def _update_msg_type_list(self):
+        current = self._msg_type_combo.currentText().strip()
+        self._msg_type_combo.blockSignals(True)
+        self._msg_type_combo.clear()
+        self._msg_type_combo.addItem("(all)")
+        if self._entries:
+            for msg_type in sorted({e.msg_type for e in self._entries if e.msg_type}):
+                self._msg_type_combo.addItem(msg_type)
+        idx = self._msg_type_combo.findText(current)
+        self._msg_type_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._msg_type_combo.blockSignals(False)
+
+    def _toggle_severity(self, severity_name: str) -> None:
+        pass  # severity chips are read-only; no toggle filtering
 
     def _on_row_selected(self, table_idx: int) -> None:
-        """Update the detail panel when a row is selected in any results table."""
         if 0 <= table_idx < len(self._view_tables):
             entry = self._view_tables[table_idx].current_entry()
             self._detail.update_entry(entry)
 
-    def _on_param_col_changed(self, idx: int):
-        self._update_param_value_list(idx)
+    def _on_msg_type_changed(self, _text: str):
         self._refresh_all_tabs()
 
-    def _on_param_value_changed(self, _text: str):
-        self._refresh_all_tabs()
+    def _export_entries(self, suffix: str, filter_str: str, writer) -> None:
+        if not self._entries:
+            QMessageBox.information(self, "Nothing to export", "Run a comparison before exporting results.")
+            return
+        if _VIEWS[self._current_view_idx][0] == "Consistency":
+            QMessageBox.information(
+                self,
+                "Consistency Export",
+                "Consistency export is not wired to the existing diff exporters yet. Switch to a diff view to export results.",
+            )
+            return
+        _, _, entity_set = _VIEWS[self._current_view_idx]
+        visible = self._filtered_entries(entity_set)
+        path, _ = QFileDialog.getSaveFileName(self, "Export report", f"dbcdiff_report{suffix}", filter_str)
+        if not path:
+            return
+        if not Path(path).suffix:
+            path += suffix
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as fp:
+                writer(visible, fp)
+            self._status.showMessage(f"✅  Exported {len(visible)} entries to {Path(path).name}")
+        except Exception as exc:  # pylint: disable=broad-except
+            QMessageBox.critical(self, "Export Error", str(exc))
 
-    def _toggle_theme(self):
-        app = QApplication.instance()
-        self._dark_theme = not self._dark_theme
-        if self._dark_theme:
-            app.setStyleSheet(_QSS_DARK)
-            self._theme_btn.setText("☀  Light")
-            self._theme_btn.setToolTip("Switch to light theme")
-        else:
-            app.setStyleSheet(_QSS_LIGHT)
-            self._theme_btn.setText("🌙  Dark")
-            self._theme_btn.setToolTip("Switch to dark theme")
+    def _export_html(self) -> None:
+        self._export_entries(".html", "HTML files (*.html)", write_html)
+
+    def _export_csv(self) -> None:
+        self._export_entries(".csv", "CSV files (*.csv)", write_csv)
+
+    def _export_json(self) -> None:
+        self._export_entries(".json", "JSON files (*.json)", write_json)
 
 
 # ---------------------------------------------------------------------------
@@ -2490,24 +3670,11 @@ class MainWindow(QMainWindow):
 def launch_gui():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("dbcdiff")
-    app.setStyleSheet(_QSS_DARK)
-
-    # dark system palette
-    palette = QPalette()
-    palette.setColor(QPalette.Window, QColor("#0d1117"))
-    palette.setColor(QPalette.WindowText, QColor("#e6edf3"))
-    palette.setColor(QPalette.Base, QColor("#161b22"))
-    palette.setColor(QPalette.AlternateBase, QColor("#0d1117"))
-    palette.setColor(QPalette.Text, QColor("#e6edf3"))
-    palette.setColor(QPalette.Button, QColor("#21262d"))
-    palette.setColor(QPalette.ButtonText, QColor("#e6edf3"))
-    palette.setColor(QPalette.Highlight, QColor("#1f6feb"))
-    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    app.setPalette(palette)
+    _apply_app_theme(app)
 
     # ── License agreement ────────────────────────────────────────────────────
     lic = LicenseDialog()
-    lic.setStyleSheet(_QSS_DARK)
+    lic.setStyleSheet(_load_app_stylesheet())
     if lic.exec() != QDialog.DialogCode.Accepted:
         sys.exit(0)
 

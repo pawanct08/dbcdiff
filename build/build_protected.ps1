@@ -1,4 +1,4 @@
-# build/build_protected.ps1 – Nuitka native-code protected build for dbcdiff-gui
+# build/build_protected.ps1 - Nuitka native-code protected build for dbcdiff
 #
 # Usage  (from repo root):
 #   .\build\build_protected.ps1
@@ -8,7 +8,7 @@
 #   A C/C++ compiler must be available (MSVC via Visual Studio, or MinGW-w64)
 #
 # Output:
-#   dist\dbcdiff-gui.exe   (compiled native binary, harder to reverse-engineer)
+#   dist\dbcdiff.exe   (compiled native binary, harder to reverse-engineer)
 #
 # Notes:
 #   • First run downloads Nuitka's C runtime (automatic, one-time ~10 MB).
@@ -18,8 +18,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ── Full path to Windows-Store Python (avoids WSL python on this machine) ──
-$PYTHON     = if (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
+# Resolve Python: prefer a native Windows install, then 'py', then 'python'
+$windowsPython = Join-Path $env:LocalAppData "Programs\Python\Python313\python.exe"
+$PYTHON = if (Test-Path $windowsPython) {
+    $windowsPython
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+    "py"
+} else {
+    "python"
+}
 $repoRoot   = Split-Path -Parent $PSScriptRoot
 $buildDir   = Join-Path $repoRoot "build"
 $distDir    = Join-Path $repoRoot "dist"

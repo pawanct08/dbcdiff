@@ -4,8 +4,8 @@ Command-line entry point for dbcdiff.
 
 Exit codes:
   0  – files are identical
-  1  – metadata-only differences
-  2  – functional changes or added/removed entities
+    1  – metadata-only differences
+    2  – functional changes
   3  – breaking changes
 """
 
@@ -17,7 +17,19 @@ import os
 import cantools
 
 from . import __version__
-from .engine import compare_databases, diff_databases, Severity, max_severity, ADDED, REMOVED, CHANGED, RENAME
+from .engine import (
+    compare_databases,
+    diff_databases,
+    Severity,
+    max_severity,
+    ADDED,
+    REMOVED,
+    CHANGED,
+    RENAME,
+    check_consistency,
+    max_consistency_level,
+    compute_bus_load,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +63,25 @@ _KIND_LABEL = {
     RENAME:  "🔄 RENAMED",
 }
 
+# Plain-text (ASCII-safe) equivalents used when colour/emoji output is disabled
+_SEV_LABEL_PLAIN = {
+    Severity.BREAKING:   "BREAKING",
+    Severity.FUNCTIONAL: "FUNCTIONAL",
+    Severity.METADATA:   "METADATA",
+}
+_KIND_LABEL_PLAIN = {
+    ADDED:   "ADDED",
+    REMOVED: "REMOVED",
+    CHANGED: "CHANGED",
+    RENAME:  "RENAMED",
+}
+
+_CHECK_LEVEL_COLOUR = {
+    "ERROR": "red",
+    "WARNING": "orange",
+    "INFO": "cyan",
+}
+
 
 def _colour(text: str, colour: str, use_colour: bool) -> str:
     if not use_colour:
@@ -73,8 +104,8 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Exit codes:
   0  identical
-  1  metadata-only differences
-  2  functional changes / added / removed
+    1  metadata-only differences
+    2  functional changes
   3  breaking changes
 
 Severity levels:
@@ -116,6 +147,10 @@ Severity levels:
     p.add_argument("--baud-rate", type=int, default=500_000, dest="baud_rate",
                    metavar="BPS",
                    help="CAN baud rate for bus-load annotation (default: 500000)")
+    p.add_argument("--bus-load", action="store_true", dest="bus_load",
+                   help="Print bus load analysis (total %% and top contributors)")
+    p.add_argument("--check", action="store_true",
+                   help="Run DBC consistency checks and print the results")
     p.add_argument("--version", action="version",
                    version=f"dbcdiff {__version__}")
     return p
@@ -145,18 +180,22 @@ def _print_entries(entries, use_colour: bool, severity_filter: str) -> None:
     visible = [e for e in entries if e.severity in allowed]
     if not visible:
         return
+    sev_labels  = _SEV_LABEL  if use_colour else _SEV_LABEL_PLAIN
+    kind_labels = _KIND_LABEL if use_colour else _KIND_LABEL_PLAIN
     for e in visible:
-        sev_lbl = _SEV_LABEL.get(e.severity, str(e.severity))
-        kind_lbl = _KIND_LABEL.get(e.kind, e.kind)
+        sev_lbl = sev_labels.get(e.severity, str(e.severity))
+        kind_lbl = kind_labels.get(e.kind, e.kind)
         col = _SEV_COLOUR.get(e.severity, "reset")
-        line = f"  [{_colour(sev_lbl, col, use_colour)}] {_bold(e.entity, use_colour)} · {e.path}  {kind_lbl}"
+        msg_type = e.msg_type or "—"
+        line = (
+            f"  [{_colour(sev_lbl, col, use_colour)}] "
+            f"{_bold(e.entity, use_colour)} · {msg_type} · {e.path}  {kind_lbl}"
+        )
         if e.value_a is not None and e.value_b is not None:
             line += (
                 f"\n      File A: {_colour(str(e.value_a), 'red', use_colour)}"
                 f"  →  File B: {_colour(str(e.value_b), 'green', use_colour)}"
             )
-        if e.protocol:
-            line += f"  [{e.protocol}]"
         if e.detail:
             line += f"\n      {e.detail}"
         print(line)
@@ -168,7 +207,10 @@ def _print_summary(entries, use_colour: bool) -> None:
         counts[e.severity] = counts.get(e.severity, 0) + 1
     total = sum(counts.values())
     if total == 0:
-        print(_colour("✅  No differences found — files are identical.", "green", use_colour))
+        no_diff_msg = "No differences found — files are identical."
+        if use_colour:
+            no_diff_msg = "✅  " + no_diff_msg
+        print(_colour(no_diff_msg, "green", use_colour))
         return
     print(_bold(f"\nSummary: {total} difference(s)", use_colour))
     for sev, lbl, col in [
@@ -179,6 +221,54 @@ def _print_summary(entries, use_colour: bool) -> None:
         n = counts.get(sev, 0)
         if n:
             print(f"  {_colour(lbl, col, use_colour)}: {n}")
+
+
+def _print_bus_load(rows: list[dict], baud_rate: int, use_colour: bool) -> None:
+    total = sum(r["load_pct"] for r in rows)
+    print(_bold(f"\nBus Load Analysis ({baud_rate // 1000} kbps)", use_colour))
+    print(f"  Total: {total:.2f}%")
+    top = rows[:10]
+    if top:
+        print(f"  {'Message':<30} {'Frame ID':>8} {'DLC':>4} {'Cycle':>9} {'Load%':>8}")
+        print(f"  {'-'*30} {'-'*8} {'-'*4} {'-'*9} {'-'*8}")
+        for r in top:
+            print(f"  {r['name']:<30} {r['frame_id']:>#8X} {r['dlc']:>4} "
+                  f"{r['cycle_ms']:>8.0f}ms {r['load_pct']:>7.3f}%")
+    if not rows:
+        print("  (No messages with cycle time found)")
+
+
+def _consistency_exit_code(level: str | None) -> int:
+    if level == "ERROR":
+        return 3
+    if level == "WARNING":
+        return 2
+    if level == "INFO":
+        return 1
+    return 0
+
+
+def _print_consistency_issues(label: str, issues, use_colour: bool) -> None:
+    print(_bold(f"\nConsistency Check: {label}", use_colour))
+    if not issues:
+        no_issue_msg = "  No consistency issues found."
+        if use_colour:
+            no_issue_msg = "  ✅  No consistency issues found."
+        print(_colour(no_issue_msg, "green", use_colour))
+        return
+
+    for issue in issues:
+        colour = _CHECK_LEVEL_COLOUR.get(issue.level, "reset")
+        location = issue.message_name or "(database)"
+        if issue.signal_name:
+            location = f"{location}.{issue.signal_name}"
+        print(
+            f"  [{_colour(issue.level, colour, use_colour)}] "
+            f"{issue.rule_id}  {_bold(location, use_colour)}"
+        )
+        print(f"      {issue.description}")
+        if issue.fix_hint:
+            print(f"      Fix: {issue.fix_hint}")
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +528,15 @@ def _main_export_matrix(argv: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
+    # Ensure stdout/stderr use UTF-8 so emoji labels are safe on Windows cp1252 consoles.
+    # reconfigure() preserves existing buffering/line-discipline settings.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass  # stream is not reconfigurable (e.g. already replaced in tests)
+
     # Fast-path: baseline subcommand is handled by its own parser
     _argv = argv if argv is not None else sys.argv[1:]
     if _argv and _argv[0] == "baseline":
@@ -505,6 +604,19 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
+    # ---- Single-file consistency mode ----
+    if args.check and not args.git and args.file_a is not None and args.file_b is None and args.file_c is None:
+        try:
+            db_single = cantools.database.load_file(args.file_a)
+        except Exception as exc:
+            print(f"Error loading '{args.file_a}': {exc}", file=sys.stderr)
+            return 4
+
+        issues = check_consistency(db_single)
+        print(_bold("dbcdiff consistency", use_colour) + f"  File: {_colour(args.file_a, 'cyan', use_colour)}")
+        _print_consistency_issues(args.file_a, issues, use_colour)
+        return _consistency_exit_code(max_consistency_level(issues))
+
     # ---- Git mode (Feature #6) ----
     if args.git:
         ref_a, ref_b, path = args.git
@@ -541,6 +653,19 @@ def main(argv: list[str] | None = None) -> int:
             return 4
         label_a, label_b = args.file_a, args.file_b
 
+    consistency_code = 0
+    if args.check:
+        issues_a = check_consistency(db_a)
+        issues_b = check_consistency(db_b)
+        print(_bold("dbcdiff consistency", use_colour))
+        _print_consistency_issues(label_a, issues_a, use_colour)
+        _print_consistency_issues(label_b, issues_b, use_colour)
+        consistency_code = max(
+            _consistency_exit_code(max_consistency_level(issues_a)),
+            _consistency_exit_code(max_consistency_level(issues_b)),
+        )
+        print()
+
     # --- Diff (git + standard modes) ---
     entries = compare_databases(db_a, db_b, path_a=label_a, path_b=label_b,
                                 baud_rate=args.baud_rate)
@@ -553,6 +678,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _print_entries(entries, use_colour, args.severity)
     _print_summary(entries, use_colour)
+    if getattr(args, "bus_load", False):
+        _print_bus_load(compute_bus_load(db_b, args.baud_rate), args.baud_rate, use_colour)
 
     # --- JSON stdout ---
     if args.json:
@@ -584,13 +711,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Exit code ---
     worst = max_severity(entries)
+    diff_code = 0
     if worst == Severity.BREAKING:
-        return 3
-    if worst == Severity.FUNCTIONAL:
-        return 2
-    if worst == Severity.METADATA:
-        return 1
-    return 0   # identical
+        diff_code = 3
+    elif worst == Severity.FUNCTIONAL:
+        diff_code = 2
+    elif worst == Severity.METADATA:
+        diff_code = 1
+    return max(diff_code, consistency_code)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from typing import Optional, TextIO
 from ..engine import DiffEntry, Severity
 
 
-FIELDNAMES = ["entity", "kind", "severity", "path", "value_a", "value_b", "protocol", "detail"]
+FIELDNAMES = ["entity", "msg_type", "kind", "severity", "path", "value_a", "value_b", "protocol", "detail"]
 
 
 def write_csv(

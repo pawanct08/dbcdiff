@@ -94,21 +94,28 @@ def _build_messages(ws, db) -> None:
     """Sheet 1: Messages — one row per CAN message."""
     headers = [
         "Frame ID (Hex)", "Frame ID (Dec)", "Name",
-        "DLC (bytes)", "Cycle Time (ms)", "Sender", "Signal Count",
+        "DLC (bytes)", "Cycle Time (ms)", "Send Type",
+        "Extended Frame", "Sender", "Signal Count", "Comment",
     ]
     _write_header(ws, headers)
 
     for i, msg in enumerate(sorted(db.messages, key=lambda m: m.frame_id), start=1):
         senders = ", ".join(msg.senders) if msg.senders else ""
         cycle = msg.cycle_time if msg.cycle_time is not None else ""
+        send_type = (msg.send_type or "") if msg.send_type is not None else ""
+        extended = "Yes" if msg.is_extended_frame else "No"
+        comment = (msg.comment or "").replace("\n", " ").replace("\r", "").strip()
         row = [
             f"0x{msg.frame_id:03X}",
             msg.frame_id,
             msg.name,
             msg.length,
             cycle,
+            send_type,
+            extended,
             senders,
             len(msg.signals),
+            comment,
         ]
         _write_data_row(ws, i + 1, row, is_odd=(i % 2 == 1))
 
@@ -120,6 +127,7 @@ def _build_signals(ws, db) -> None:
     headers = [
         "Message", "Frame ID (Hex)", "Signal Name",
         "Start Bit", "Length (bits)", "Byte Order",
+        "Signed", "Is Mux", "Mux IDs",
         "Scale", "Offset", "Unit", "Min", "Max",
         "Receivers", "Comment",
     ]
@@ -135,6 +143,12 @@ def _build_signals(ws, db) -> None:
             unit = sig.unit or ""
             receivers = ", ".join(sig.receivers) if sig.receivers else ""
             comment = (sig.comment or "").replace("\n", " ").replace("\r", "").strip()
+            signed = "Yes" if sig.is_signed else "No"
+            is_mux = "Yes" if sig.is_multiplexer else "No"
+            mux_ids = (
+                ", ".join(str(m) for m in sig.multiplexer_ids)
+                if sig.multiplexer_ids else ""
+            )
 
             row = [
                 msg.name,
@@ -143,6 +157,9 @@ def _build_signals(ws, db) -> None:
                 sig.start,
                 sig.length,
                 _byte_order_label(sig),
+                signed,
+                is_mux,
+                mux_ids,
                 scale,
                 offset,
                 unit,

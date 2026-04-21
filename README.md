@@ -83,8 +83,6 @@ if [ $? -ge 3 ]; then echo "BREAKING CHANGES – review required"; exit 1; fi
 ```bash
 # Launch GUI (double-click exe, or run without arguments)
 dbcdiff
-# or
-dbcdiff-gui
 ```
 
 1. Drag a `.dbc` file onto the **File A** drop zone (or click **Browse**).
@@ -132,7 +130,7 @@ The `--html` flag produces a **self-contained HTML file** (no external CSS or JS
 ```powershell
 pip install pyinstaller pillow
 .\build\build_exe.ps1
-# → dist\dbcdiff-gui.exe
+# → dist\dbcdiff.exe
 ```
 
 ### Option B — Nuitka (native code, harder to decompile)
@@ -141,7 +139,7 @@ pip install pyinstaller pillow
 pip install nuitka ordered-set zstandard pillow
 # + install Visual Studio Build Tools (or MinGW-w64)
 .\build\build_protected.ps1
-# → dist\dbcdiff-gui.exe
+# → dist\dbcdiff.exe
 ```
 
 See [`build/`](build/) for full scripts and [`DESIGN.md`](DESIGN.md) for

@@ -5,11 +5,14 @@ Unit tests for dbcdiff.engine using in-memory DBC definitions.
 from __future__ import annotations
 
 import textwrap
+from types import SimpleNamespace
 import pytest
 import cantools
 
 from dbcdiff.engine import (
     compare_databases,
+    check_consistency,
+    max_severity,
     Severity,
     ADDED,
     REMOVED,
@@ -37,6 +40,40 @@ def _find(entries, kind=None, entity=None, path_fragment=None):
     if path_fragment is not None:
         out = [e for e in out if path_fragment in e.path]
     return out
+
+
+def _fake_signal(name, start, length, **kwargs):
+    defaults = {
+        "byte_order": "little_endian",
+        "scale": 1,
+        "offset": 0,
+        "choices": None,
+        "receivers": [],
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(name=name, start=start, length=length, **defaults)
+
+
+def _fake_message(name, frame_id, dlc, signals, **kwargs):
+    defaults = {
+        "senders": [],
+        "send_type": None,
+        "cycle_time": None,
+        "dbc": None,
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(
+        name=name,
+        frame_id=frame_id,
+        length=dlc,
+        signals=signals,
+        **defaults,
+    )
+
+
+def _fake_db(messages, node_names=None):
+    nodes = [SimpleNamespace(name=node_name) for node_name in (node_names or [])]
+    return SimpleNamespace(messages=messages, nodes=nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -234,18 +271,18 @@ class TestSignalSeverity:
             f"Expected BREAKING for overlapping removed signal, got {removed[0].severity}"
         )
 
-    def test_signal_removed_without_overlap_is_functional(self):
+    def test_signal_removed_without_overlap_is_breaking(self):
         """
         RPM removed from EngineData in B, Temp stays; no other signal uses bits 0-15
-        → no overlap → FUNCTIONAL.
+        → removed from the bus → BREAKING.
         """
         db_a = _load(MINIMAL_MSG)
         db_b = _load(MSG_RPM_REMOVED)
         entries = compare_databases(db_a, db_b)
         removed = _find(entries, kind=REMOVED, entity="signal", path_fragment="RPM")
         assert removed, "Expected REMOVED signal entry for RPM"
-        assert removed[0].severity == Severity.FUNCTIONAL, (
-            f"Expected FUNCTIONAL for non-overlapping removed signal, got {removed[0].severity}"
+        assert removed[0].severity == Severity.BREAKING, (
+            f"Expected BREAKING for removed signal, got {removed[0].severity}"
         )
 
     def test_signal_added_with_overlap_is_breaking(self):
@@ -265,19 +302,29 @@ class TestSignalSeverity:
             f"Expected BREAKING for overlapping added signal, got {added[0].severity}"
         )
 
-    def test_signal_added_without_overlap_is_functional(self):
+    def test_signal_added_without_overlap_is_breaking(self):
         """
         FuelRate added at bits 32-39, no existing signal covers those bits
-        → no overlap → FUNCTIONAL.
+        → introduced onto the bus → BREAKING.
         """
         db_a = _load(MINIMAL_MSG)
         db_b = _load(MSG_NO_OVERLAP_ADDED)
         entries = compare_databases(db_a, db_b)
         added = _find(entries, kind=ADDED, entity="signal", path_fragment="FuelRate")
         assert added, "Expected ADDED signal entry for FuelRate"
-        assert added[0].severity == Severity.FUNCTIONAL, (
-            f"Expected FUNCTIONAL for non-overlapping added signal, got {added[0].severity}"
+        assert added[0].severity == Severity.BREAKING, (
+            f"Expected BREAKING for added signal, got {added[0].severity}"
         )
+
+    def test_added_removed_signal_or_message_drives_breaking_exit_code(self):
+        """Added or removed messages/signals must elevate max_severity to BREAKING."""
+        removed_signal_entries = compare_databases(_load(MINIMAL_MSG), _load(MSG_RPM_REMOVED))
+        added_signal_entries = compare_databases(_load(MINIMAL_MSG), _load(MSG_NO_OVERLAP_ADDED))
+        added_message_entries = compare_databases(_load(DIFFERENT_MSG), _load(MINIMAL_MSG))
+
+        assert max_severity(removed_signal_entries) == Severity.BREAKING
+        assert max_severity(added_signal_entries) == Severity.BREAKING
+        assert max_severity(added_message_entries) == Severity.BREAKING
 
     def test_signal_scale_change_is_functional(self):
         """Changing signal scale (but not bit position) → FUNCTIONAL."""
@@ -609,6 +656,80 @@ class TestThreeWayDiff:
             "No conflict expected when both branches make the same change"
         )
 
+
+class TestConsistencyChecks:
+
+    def test_bit_overlap_reports_can_c01_error(self):
+        db = _fake_db([
+            _fake_message(
+                "EngineData",
+                0x100,
+                8,
+                [
+                    _fake_signal("RPM", 0, 16),
+                    _fake_signal("Torque", 8, 8),
+                ],
+            )
+        ])
+
+        issues = check_consistency(db)
+
+        overlap = [issue for issue in issues if issue.rule_id == "CAN-C01"]
+        assert overlap
+        assert overlap[0].level == "ERROR"
+        assert overlap[0].message_name == "EngineData"
+        assert overlap[0].signal_name == "Torque"
+
+    def test_dlc_undersize_reports_can_c02_error(self):
+        db = _fake_db([
+            _fake_message(
+                "ShortFrame",
+                0x101,
+                1,
+                [_fake_signal("TooWide", 4, 8)],
+            )
+        ])
+
+        issues = check_consistency(db)
+
+        dlc_issue = [issue for issue in issues if issue.rule_id == "CAN-C02"]
+        assert dlc_issue
+        assert dlc_issue[0].level == "ERROR"
+        assert dlc_issue[0].message_name == "ShortFrame"
+
+    def test_duplicate_frame_id_reports_can_c03_error(self):
+        db = _fake_db([
+            _fake_message("MsgA", 0x200, 8, [_fake_signal("SigA", 0, 8)]),
+            _fake_message("MsgB", 0x200, 8, [_fake_signal("SigB", 8, 8)]),
+        ])
+
+        issues = check_consistency(db)
+
+        duplicate_issues = [issue for issue in issues if issue.rule_id == "CAN-C03"]
+        assert len(duplicate_issues) == 2
+        assert all(issue.level == "ERROR" for issue in duplicate_issues)
+
+    def test_sender_scale_and_length_rules_are_reported(self):
+        db = _fake_db([
+            _fake_message(
+                "BodyStatus",
+                0x300,
+                8,
+                [
+                    _fake_signal("ConstSignal", 0, 8, scale=0),
+                    _fake_signal("SignalNameThatIsLongerThanThirtyTwoChars", 8, 8),
+                ],
+                senders=["MissingNode"],
+            )
+        ], node_names=["Cluster"])
+
+        issues = check_consistency(db)
+
+        rule_ids = {issue.rule_id for issue in issues}
+        assert "CAN-C04" in rule_ids
+        assert "CAN-C05" in rule_ids
+        assert "CAN-C08" in rule_ids
+
     def test_three_way_identical_bases_empty(self):
         """All three DBCs identical → all result lists empty."""
         from dbcdiff.engine import compare_three_way
@@ -760,3 +881,77 @@ class TestBaseline:
         dbc.write_text(textwrap.dedent(MINIMAL_MSG))
         with pytest.raises(FileNotFoundError, match="baseline"):
             check_baseline(str(dbc), baseline_dir=tmp_path / "no_such_dir")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 – Silent breaking change detector
+# ---------------------------------------------------------------------------
+
+_PHASE7_OLD_DBC = """\
+    VERSION ""
+
+    NS_ :
+
+    BS_:
+
+    BU_:
+
+    BO_ 100 Engine: 8 Vector__XXX
+     SG_ EngineSpeed : 0|16@1+ (0.1,0) [0|6553.5] "rpm" Vector__XXX
+
+    """
+
+_PHASE7_NEW_DBC_BIG_RANGE_CHANGE = """\
+    VERSION ""
+
+    NS_ :
+
+    BS_:
+
+    BU_:
+
+    BO_ 100 Engine: 8 Vector__XXX
+     SG_ EngineSpeed : 0|16@1+ (0.05,0) [0|3276.75] "rpm" Vector__XXX
+
+    """
+
+_PHASE7_NEW_DBC_SMALL_RANGE_CHANGE = """\
+    VERSION ""
+
+    NS_ :
+
+    BS_:
+
+    BU_:
+
+    BO_ 100 Engine: 8 Vector__XXX
+     SG_ EngineSpeed : 0|16@1+ (0.099,0) [0|6487.965] "rpm" Vector__XXX
+
+    """
+
+
+class TestPhase7BreakingRangeDetector:
+
+    def test_large_range_change_upgrades_to_breaking(self):
+        """Scale+range change >10% → FUNCTIONAL entries upgraded to BREAKING with detail."""
+        db_a = _load(_PHASE7_OLD_DBC)
+        db_b = _load(_PHASE7_NEW_DBC_BIG_RANGE_CHANGE)
+        entries = compare_databases(db_a, db_b)
+        scale_entries = _find(entries, kind=CHANGED, entity="signal", path_fragment=".scale")
+        assert scale_entries, "Expected a CHANGED entry for EngineSpeed.scale"
+        assert scale_entries[0].severity == Severity.BREAKING, (
+            "Scale change with >10% physical range shift should be BREAKING"
+        )
+        assert scale_entries[0].detail, "BREAKING entry must have a non-empty detail message"
+        assert "Physical range changed" in scale_entries[0].detail
+
+    def test_small_range_change_stays_functional(self):
+        """Scale change where range shifts <=10% must remain FUNCTIONAL."""
+        db_a = _load(_PHASE7_OLD_DBC)
+        db_b = _load(_PHASE7_NEW_DBC_SMALL_RANGE_CHANGE)
+        entries = compare_databases(db_a, db_b)
+        scale_entries = _find(entries, kind=CHANGED, entity="signal", path_fragment=".scale")
+        if scale_entries:
+            assert scale_entries[0].severity == Severity.FUNCTIONAL, (
+                "Scale change with <=10% physical range shift must stay FUNCTIONAL"
+            )

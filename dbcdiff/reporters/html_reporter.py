@@ -23,6 +23,7 @@ _KIND_BADGE = {
     ADDED:   '<span class="badge added">➕ ADDED</span>',
     REMOVED: '<span class="badge removed">➖ REMOVED</span>',
     CHANGED: '<span class="badge changed">✏️ CHANGED</span>',
+    'renamed': '<span class="badge changed">🔄 RENAMED</span>',
 }
 
 _CSS = """
@@ -216,8 +217,9 @@ def write_html(entries: list[DiffEntry], fp: TextIO,
   <thead>
     <tr>
       <th>Severity</th>
-      <th>Kind</th>
       <th>Entity</th>
+            <th>MSG TYPE</th>
+            <th>Kind</th>
       <th>Path</th>
       <th>File A Value</th>
       <th>File B Value</th>
@@ -246,20 +248,30 @@ def _build_rows(entries: list[DiffEntry]) -> str:
         }.get(e.severity, "metadata")
         sev_badge, _ = _SEV_BADGE.get(e.severity, ("", ""))
         kind_badge = _KIND_BADGE.get(e.kind, e.kind)
+        msg_type = html.escape(e.msg_type) if e.msg_type else '<span style="color:#8b949e">—</span>'
         old_v = _fmt_val(e.value_a)
         new_v = _fmt_val(e.value_b)
         proto = html.escape(e.protocol) if e.protocol else '<span style="color:#8b949e">—</span>'
         parts.append(
             f'<tr data-sev="{sev_key}">'
             f'<td>{sev_badge}</td>'
-            f'<td>{kind_badge}</td>'
             f'<td>{html.escape(e.entity)}</td>'
+            f'<td>{msg_type}</td>'
+            f'<td>{kind_badge}</td>'
             f'<td class="path">{html.escape(e.path)}</td>'
             f'<td class="old">{old_v}</td>'
             f'<td class="new">{new_v}</td>'
             f'<td class="path">{proto}</td>'
             f'</tr>'
         )
+        if e.detail:
+            parts.append(
+                f'<tr data-sev="{sev_key}" style="font-style:italic;">'
+                f'<td></td>'
+                f'<td colspan="7" style="padding-left:2em;color:#d29922;">'
+                f'&#x26A0; {html.escape(e.detail)}</td>'
+                f'</tr>'
+            )
     return "\n    ".join(parts)
 
 
@@ -274,9 +286,17 @@ def _fmt_val(v) -> str:
 # ---------------------------------------------------------------------------
 
 _BIT_COLORS = [
-    "#58a6ff", "#3fb950", "#d29922", "#f85149", "#8957e5",
-    "#39d353", "#ff7b72", "#ffa657", "#79c0ff", "#56d364",
+    "#58A6FF", "#3FB950", "#D29922", "#F85149",
+    "#8957E5", "#39D0D8", "#FF7B72", "#FFA657",
 ]
+
+
+def _motorola_start_bit(sig) -> int:
+    try:
+        import cantools
+        return int(cantools.database.can.signal.start_bit(sig))
+    except Exception:
+        return int(sig.start)
 
 
 def _motorola_bits_html(start_bit: int, length: int) -> set[int]:
@@ -305,7 +325,8 @@ def _build_signal_bit_map(msg) -> dict[int, str]:
     bit_map: dict[int, str] = {}
     for sig in msg.signals:
         if sig.byte_order == "big_endian":
-            positions = _motorola_bits_html(int(sig.start), int(sig.length))
+            start_bit = _motorola_start_bit(sig)
+            positions = set(range(start_bit, start_bit + int(sig.length)))
         else:
             positions = set(range(int(sig.start), int(sig.start) + int(sig.length)))
         for bit in positions:
@@ -320,7 +341,6 @@ def _render_bit_panel(title: str, msg, color_map: dict[str, str]) -> str:
     Each cell carries a ``title`` tooltip with the signal name and its
     physical-value formula.
     """
-    n_bytes = max(msg.length, 1)
     bit_map = _build_signal_bit_map(msg)
 
     # Build signal → tooltip formula
@@ -337,7 +357,7 @@ def _render_bit_panel(title: str, msg, color_map: dict[str, str]) -> str:
     ) + "</tr>\n"
 
     rows = [hdr]
-    for r in range(n_bytes):
+    for r in range(8):
         row_html = f'<td class="bg-byte-hdr">Byte {r}</td>'
         for c in range(8):
             bit_num = r * 8 + (7 - c)
@@ -345,7 +365,10 @@ def _render_bit_panel(title: str, msg, color_map: dict[str, str]) -> str:
             if sig_name:
                 bg = color_map.get(sig_name, "#58a6ff")
                 abbrev = html.escape(sig_name[:5])
-                tip = html.escape(sig_info.get(sig_name, sig_name))
+                sig = next((signal for signal in msg.signals if signal.name == sig_name), None)
+                tip = html.escape(
+                    f"{sig_name}\nstart_bit={getattr(sig, 'start', '?')}\nlength={getattr(sig, 'length', '?')}"
+                )
                 row_html += (
                     f'<td class="bg-cell" style="background:{bg}" title="{tip}">'
                     f'<span class="bg-name">{abbrev}</span></td>'
@@ -379,10 +402,16 @@ def _render_bit_panel(title: str, msg, color_map: dict[str, str]) -> str:
 
 def _build_bit_sections(entries: list[DiffEntry], db_a, db_b) -> str:
     """Build HTML for changed messages' bit-layout side-by-side panels."""
+    def _message_name_from_path(path: str) -> str:
+        parts = path.split(".")
+        if path.startswith("message.") and len(parts) > 1:
+            return parts[1].split("(", 1)[0]
+        return path.split("(", 1)[0].split(".")[-1]
+
     changed_msg_names = {
-        e.entity
+        _message_name_from_path(e.path)
         for e in entries
-        if e.kind == CHANGED and e.path.split(".")[0] == e.entity
+        if e.kind == CHANGED and e.entity in {"message", "signal"} and e.path
     }
     if not changed_msg_names:
         return ""
