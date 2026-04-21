@@ -451,8 +451,9 @@ class DBCDropZone(QFrame):
         super().__init__(parent)
         self.setObjectName("drop_zone")
         self.setAcceptDrops(True)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMinimumHeight(100)
+        self.setMaximumHeight(140)
         self._path: Optional[str] = None
 
         self._icon = QLabel("📂", self)
@@ -3159,13 +3160,14 @@ class MainWindow(QMainWindow):
         compare_vbox.setContentsMargins(0, 0, 0, 0)
         compare_vbox.setSpacing(14)
 
-        drop_row = QWidget()
+        self._drop_row_widget = QWidget()
+        drop_row = self._drop_row_widget
         drop_hl = QHBoxLayout(drop_row)
         drop_hl.setContentsMargins(0, 0, 0, 0)
         drop_hl.setSpacing(14)
         drop_hl.addWidget(self._drop_a)
         drop_hl.addWidget(self._drop_b)
-        compare_vbox.addWidget(drop_row)
+        compare_vbox.addWidget(drop_row, 0)
 
         results_area = QWidget()
         compare_layout = QHBoxLayout(results_area)
@@ -3295,6 +3297,11 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def _on_file_chosen(self, _path: str):
+        # New file selected — clear old results and re-show drop zones
+        self._entries = []
+        self._db_a = None
+        self._db_b = None
+        self._drop_row_widget.setVisible(True)
         ready = self._drop_a.path and self._drop_b.path
         self._compare_btn.setEnabled(bool(ready))
         self._base_file_text.setText(Path(self._drop_a.path).name if self._drop_a.path else "Choose a source DBC")
@@ -3310,6 +3317,7 @@ class MainWindow(QMainWindow):
     def _on_compare(self):
         if not self._drop_a.path or not self._drop_b.path:
             return
+        self._set_mode("compare")  # ensure compare page is active
         self._compare_btn.setEnabled(False)
         self._status.showMessage("⏳  Analysing…")
         for tbl in self._view_tables:
@@ -3329,6 +3337,7 @@ class MainWindow(QMainWindow):
         self._entries = entries
         self._db_a = db_a
         self._db_b = db_b
+        self._drop_row_widget.setVisible(False)  # collapse drop zones; results get full height
         self._consistency_records = self._build_consistency_records(db_a, db_b)
         self._detail.set_databases(db_a, db_b)
         self._decoder_tab.set_database(db_b or db_a)
@@ -3355,6 +3364,7 @@ class MainWindow(QMainWindow):
 
     def _on_compare_error(self, msg: str):
         self._compare_btn.setEnabled(True)
+        self._drop_row_widget.setVisible(True)  # restore drop zones on error
         self._refresh_header_state()
         self._status.showMessage(f"❌  Error: {msg}")
         QMessageBox.critical(self, "Compare Error", msg)
