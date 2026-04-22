@@ -8,7 +8,7 @@ version = "0.4.0"
 description = "Semantically compare two CAN .dbc database files"
 readme = "README.md"
 license = { file = "LICENSE" }
-keywords = ["canbus", "dbc", "diff", "automotive", "cantools", "can-bus", "j1939", "dbc-diff", "vector-dbc"]
+keywords = ["CAN", "DBC", "automotive", "diff", "cantools", "ECU", "canbus", "can-bus", "j1939", "dbc-diff", "vector-dbc"]
 authors = [{ name = "pawanct08", email = "ctpawan08@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = ["cantools>=41.0", "openpyxl>=3.1"]
@@ -17,6 +17,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Scientific/Engineering :: Interface Engine/Protocol Translator",
     "Environment :: Console",
+    "Topic :: Software Development :: Automotive",
     "Topic :: Software Development :: Embedded Systems",
     "Topic :: Software Development :: Version Control",
     "License :: OSI Approved :: MIT License",
@@ -40,7 +41,7 @@ dbcdiff-gui = "dbcdiff.gui:launch_gui"
 [project.urls]
 Repository  = "https://github.com/pawanct08/dbcdiff"
 Issue-Tracker = "https://github.com/pawanct08/dbcdiff/issues"
-Changelog   = "https://github.com/pawanct08/dbcdiff/releases"
+Changelog   = "https://github.com/pawanct08/dbcdiff/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]

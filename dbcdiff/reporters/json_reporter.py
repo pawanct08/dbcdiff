@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import TextIO
 
-from ..engine import DiffEntry, Severity, max_severity
+from ..engine import ADDED, REMOVED, RENAME, DiffEntry, Severity, max_severity
 from .. import __version__
 
 
@@ -46,14 +46,17 @@ def write_json(entries: list[DiffEntry], fp: TextIO, pretty: bool = True,
             "file_b":    path_b,
         },
         "summary": {
-            "total":      len(entries),
-            "breaking":   sum(1 for e in entries if e.severity == Severity.BREAKING),
-            "functional": sum(1 for e in entries if e.severity == Severity.FUNCTIONAL),
-            "metadata":   sum(1 for e in entries if e.severity == Severity.METADATA),
-            "worst":      ms.name if ms else "IDENTICAL",
+            "total":          len(entries),
+            "breaking":       sum(1 for e in entries if e.severity == Severity.BREAKING),
+            "functional":     sum(1 for e in entries if e.severity == Severity.FUNCTIONAL),
+            "metadata":       sum(1 for e in entries if e.severity == Severity.METADATA),
+            "added":          sum(1 for e in entries if e.kind == ADDED),
+            "removed":        sum(1 for e in entries if e.kind == REMOVED),
+            "renamed":        sum(1 for e in entries if e.kind == RENAME),
+            "worst_severity": ms.name if ms else "IDENTICAL",
         },
-        "diffs": [e.as_dict() for e in entries],
         "bus_load_delta": _compute_bus_load_delta(entries),
+        "diffs": [e.as_dict() for e in entries],
     }
     indent = 2 if pretty else None
     json.dump(payload, fp, indent=indent, default=str)
