@@ -423,15 +423,15 @@ QLineEdit {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _cell_item(text: str, align=Qt.AlignLeft) -> QTableWidgetItem:
+def _cell_item(text: str, align=Qt.AlignmentFlag.AlignLeft) -> QTableWidgetItem:
     item = QTableWidgetItem(str(text))
-    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-    item.setTextAlignment(align | Qt.AlignVCenter)
+    item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+    item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
     return item
 
 
 def _colored_item(text: str, bg: str, fg: str) -> QTableWidgetItem:
-    item = _cell_item(text, Qt.AlignCenter)
+    item = _cell_item(text, Qt.AlignmentFlag.AlignCenter)
     item.setBackground(QColor(bg))
     item.setForeground(QColor(fg))
     f = item.font()
@@ -457,15 +457,15 @@ class DBCDropZone(QFrame):
         self._path: Optional[str] = None
 
         self._icon = QLabel("📂", self)
-        self._icon.setAlignment(Qt.AlignCenter)
+        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._icon.setStyleSheet("font-size: 28px; background: transparent; border: none;")
 
         self._hint = QLabel(label, self)
-        self._hint.setAlignment(Qt.AlignCenter)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint.setStyleSheet("color: #8b949e; font-size: 12px; background: transparent; border: none;")
 
         self._filename = QLabel("", self)
-        self._filename.setAlignment(Qt.AlignCenter)
+        self._filename.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._filename.setStyleSheet("color: #58a6ff; font-size: 12px; background: transparent; border: none;")
         self._filename.setVisible(False)
 
@@ -479,7 +479,7 @@ class DBCDropZone(QFrame):
         layout.addWidget(self._icon)
         layout.addWidget(self._hint)
         layout.addWidget(self._filename)
-        layout.addWidget(btn, alignment=Qt.AlignCenter)
+        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
 
     # ------------------------------------------------------------------
@@ -655,8 +655,8 @@ class ResultsTable(QTableWidget):
             # Col 4: Old value — red strikethrough monospace
             old_text = str(e.value_a) if e.value_a is not None else ""
             old_item = QTableWidgetItem(old_text)
-            old_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            old_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            old_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            old_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if old_text:
                 old_font = QFont("Courier New", 9)
                 old_font.setStrikeOut(True)
@@ -665,15 +665,15 @@ class ResultsTable(QTableWidget):
             self.setItem(row, 4, old_item)
 
             # Col 5: Arrow — centered muted
-            arr_item = _cell_item("\u2192", Qt.AlignCenter)
+            arr_item = _cell_item("\u2192", Qt.AlignmentFlag.AlignCenter)
             arr_item.setForeground(QColor("#636366"))
             self.setItem(row, 5, arr_item)
 
             # Col 6: New value — green monospace
             new_text = str(e.value_b) if e.value_b is not None else ""
             new_item = QTableWidgetItem(new_text)
-            new_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            new_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            new_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            new_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if new_text:
                 new_item.setFont(mono)
                 new_item.setForeground(QColor("#30d158"))
