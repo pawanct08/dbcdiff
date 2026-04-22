@@ -31,11 +31,11 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ---------------------------------------------------------------------------
 # Colour palette (Office 2019 "Blue" scheme)
 # ---------------------------------------------------------------------------
-_H_FILL = PatternFill("solid", fgColor="4472C4")   # header – medium blue
-_H_FONT = Font(bold=True, color="FFFFFF", size=11, name="Calibri")
+_H_FILL = PatternFill("solid", fgColor="1B4F8A")   # header – navy blue
+_H_FONT = Font(bold=True, color="FFFFFF", size=12, name="Calibri")
 _H_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=False)
 
-_ODD_FILL = PatternFill("solid", fgColor="DCE6F1")  # alternating row – light blue
+_ODD_FILL = PatternFill("solid", fgColor="EBF2F8")  # alternating row – light blue
 _EVN_FILL = PatternFill("solid", fgColor="FFFFFF")  # alternating row – white
 _DATA_FONT = Font(size=10, name="Calibri")
 _DATA_ALIGN = Alignment(horizontal="left", vertical="center", wrap_text=False)
@@ -53,6 +53,7 @@ def _write_header(ws, headers: list[str]) -> None:
         cell.font = _H_FONT
         cell.alignment = _H_ALIGN
     ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
     ws.row_dimensions[1].height = 18
 
 
@@ -77,7 +78,7 @@ def _autofit_columns(ws, headers: list[str], max_width: int = 60) -> None:
             for cell in row:
                 if cell.value is not None:
                     col_max = max(col_max, min(len(str(cell.value)), max_width))
-        ws.column_dimensions[col_letter].width = col_max + 2
+        ws.column_dimensions[col_letter].width = col_max * 1.2
 
 
 def _byte_order_label(sig) -> str:
@@ -93,9 +94,9 @@ def _byte_order_label(sig) -> str:
 def _build_messages(ws, db) -> None:
     """Sheet 1: Messages — one row per CAN message."""
     headers = [
-        "Frame ID (Hex)", "Frame ID (Dec)", "Name",
-        "DLC (bytes)", "Cycle Time (ms)", "Send Type",
-        "Extended Frame", "Sender", "Signal Count", "Comment",
+        "Frame ID (hex)", "Name", "DLC",
+        "Cycle Time", "Send Type", "Sender",
+        "Signal Count", "Comment",
     ]
     _write_header(ws, headers)
 
@@ -103,16 +104,13 @@ def _build_messages(ws, db) -> None:
         senders = ", ".join(msg.senders) if msg.senders else ""
         cycle = msg.cycle_time if msg.cycle_time is not None else ""
         send_type = (msg.send_type or "") if msg.send_type is not None else ""
-        extended = "Yes" if msg.is_extended_frame else "No"
         comment = (msg.comment or "").replace("\n", " ").replace("\r", "").strip()
         row = [
             f"0x{msg.frame_id:03X}",
-            msg.frame_id,
             msg.name,
             msg.length,
             cycle,
             send_type,
-            extended,
             senders,
             len(msg.signals),
             comment,
@@ -125,10 +123,10 @@ def _build_messages(ws, db) -> None:
 def _build_signals(ws, db) -> None:
     """Sheet 2: Signals — one row per signal across all messages."""
     headers = [
-        "Message", "Frame ID (Hex)", "Signal Name",
-        "Start Bit", "Length (bits)", "Byte Order",
-        "Signed", "Is Mux", "Mux IDs",
-        "Scale", "Offset", "Unit", "Min", "Max",
+        "Message", "Frame ID", "Signal",
+        "Start Bit", "Length", "Byte Order",
+        "Signed", "Scale", "Offset",
+        "Min", "Max", "Unit",
         "Receivers", "Comment",
     ]
     _write_header(ws, headers)
@@ -144,11 +142,6 @@ def _build_signals(ws, db) -> None:
             receivers = ", ".join(sig.receivers) if sig.receivers else ""
             comment = (sig.comment or "").replace("\n", " ").replace("\r", "").strip()
             signed = "Yes" if sig.is_signed else "No"
-            is_mux = "Yes" if sig.is_multiplexer else "No"
-            mux_ids = (
-                ", ".join(str(m) for m in sig.multiplexer_ids)
-                if sig.multiplexer_ids else ""
-            )
 
             row = [
                 msg.name,
@@ -158,13 +151,11 @@ def _build_signals(ws, db) -> None:
                 sig.length,
                 _byte_order_label(sig),
                 signed,
-                is_mux,
-                mux_ids,
                 scale,
                 offset,
-                unit,
                 vmin,
                 vmax,
+                unit,
                 receivers,
                 comment,
             ]

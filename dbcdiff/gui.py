@@ -3623,8 +3623,9 @@ class MainWindow(QMainWindow):
             topbar_layout.addWidget(chip)
 
         for label, handler, obj_name in [
-            ("Export HTML", self._export_html, "exportButton"),
-            ("Export CSV",  self._export_csv,  "exportButtonPrimary"),
+            ("Export HTML",           self._export_html,   "exportButton"),
+            ("Export CSV",            self._export_csv,    "exportButtonPrimary"),
+            ("Export Matrix (Excel)", self._export_matrix, "exportButtonPrimary"),
         ]:
             btn = QPushButton(label)
             btn.setObjectName(obj_name)
@@ -4216,6 +4217,36 @@ class MainWindow(QMainWindow):
 
     def _export_csv(self) -> None:
         self._export_entries(".csv", "CSV files (*.csv)", write_csv)
+
+    def _export_matrix(self) -> None:
+        """Export the loaded DBC as a Communication Matrix Excel workbook."""
+        path = self._drop_b.path or self._drop_a.path
+        if not path:
+            QMessageBox.warning(
+                self,
+                "No DBC Loaded",
+                "Load a DBC file in the sidebar before exporting a matrix.",
+            )
+            return
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Communication Matrix", "", "Excel files (*.xlsx)"
+        )
+        if not out_path:
+            return
+        if not out_path.lower().endswith(".xlsx"):
+            out_path += ".xlsx"
+        try:
+            import cantools
+            db = cantools.database.load_file(path)
+            from .reporters.excel_reporter import write_excel
+            write_excel(db, out_path)
+            self._status.showMessage(
+                f"✅  Matrix exported → {Path(out_path).name}  "
+                f"({len(db.messages)} messages, "
+                f"{sum(len(m.signals) for m in db.messages)} signals)"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            QMessageBox.critical(self, "Export Error", str(exc))
 
     def _export_json(self) -> None:
         self._export_entries(".json", "JSON files (*.json)", write_json)
