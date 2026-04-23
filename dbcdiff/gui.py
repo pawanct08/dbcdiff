@@ -108,7 +108,7 @@ def _load_app_stylesheet() -> str:
     try:
         return _STYLE_PATH.read_text(encoding="utf-8")
     except OSError:
-        return ""
+        return _QSS_DARK
 
 
 def _apply_app_theme(app: QApplication) -> None:
@@ -3027,6 +3027,7 @@ function showDetail(msg) {
     ['DLC',       msg.dlc + ' bytes'],
     ['Cycle',     msg.cycle_time ? msg.cycle_time + ' ms' : '\u2014'],
     ['Senders',   (msg.senders || []).join(', ') || '\u2014'],
+    ['Receivers', (msg.receivers || []).join(', ') || '\u2014'],
     ['Signals',   '' + (msg.signal_count || 0)],
   ];
   if (msg.severity) {
@@ -3218,6 +3219,7 @@ animate();
                 "dlc":          m.length,
                 "cycle_time":   m.cycle_time or 0,
                 "senders":      list(m.senders or []),
+                "receivers":    sorted({r for sig in m.signals for r in (getattr(sig, "receivers", None) or [])}),
                 "comment":      m.comment or "",
                 "signal_count": len(m.signals),
                 "signals": [
@@ -3878,6 +3880,7 @@ class MainWindow(QMainWindow):
         self._summary.update(entries)
         self._update_sev_chips()
         self._refresh_all_tabs()
+        self._set_view(0)
         self._refresh_header_state(compared=True)
         worst = max((e.severity for e in entries), default=None)
         if entries:
