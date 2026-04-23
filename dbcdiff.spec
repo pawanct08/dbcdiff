@@ -46,7 +46,7 @@ a = Analysis(
     binaries=[],
     # dbcdiff package has no static asset files (3d_sim.html is embedded as a
     # string literal in gui.py).  Only bundle the QSS theme file.
-    datas=[('../resources', 'resources')],
+    datas=[('resources', 'resources')],
     # dbcdiff submodules are imported conditionally in __main__.py, so
     # PyInstaller's static analyser misses them — list them explicitly.
     hiddenimports=[
