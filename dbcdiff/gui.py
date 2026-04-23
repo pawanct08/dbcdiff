@@ -745,7 +745,9 @@ class _DetailPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("detailPanel")
-        self.setFixedWidth(300)
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(340)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -3464,7 +3466,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("dbcdiff")
-        self.setMinimumSize(1380, 860)
+        self.setMinimumSize(1280, 720)
         self._entries: list[DiffEntry] = []
         self._consistency_records: list[dict] = []
         self._active_severities = {
@@ -3607,6 +3609,7 @@ class MainWindow(QMainWindow):
         self._page_title.setObjectName("pageTitle")
         self._page_subtitle = QLabel("Choose two DBC files to compare messages, signals, nodes, and consistency rules.")
         self._page_subtitle.setObjectName("pageSubtitle")
+        self._page_subtitle.setWordWrap(True)
         title_block.addWidget(self._page_title)
         title_block.addWidget(self._page_subtitle)
         topbar_layout.addLayout(title_block)
@@ -3655,25 +3658,29 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self._search_input, 2)
 
         self._protocol_combo = QComboBox()
-        self._protocol_combo.setFixedWidth(120)
+        self._protocol_combo.setMinimumWidth(80)
+        self._protocol_combo.setMaximumWidth(140)
         self._protocol_combo.addItem("(all)")
         self._protocol_combo.currentTextChanged.connect(self._refresh_all_tabs)
         filter_row.addWidget(self._protocol_combo)
 
         self._ecu_combo = QComboBox()
-        self._ecu_combo.setFixedWidth(140)
+        self._ecu_combo.setMinimumWidth(100)
+        self._ecu_combo.setMaximumWidth(180)
         self._ecu_combo.addItem("(all)")
         self._ecu_combo.currentTextChanged.connect(self._refresh_all_tabs)
         filter_row.addWidget(self._ecu_combo)
 
         self._msg_type_combo = QComboBox()
-        self._msg_type_combo.setFixedWidth(150)
+        self._msg_type_combo.setMinimumWidth(100)
+        self._msg_type_combo.setMaximumWidth(180)
         self._msg_type_combo.addItem("(all)")
         self._msg_type_combo.currentTextChanged.connect(self._on_msg_type_changed)
         filter_row.addWidget(self._msg_type_combo)
 
         self._sort_combo = QComboBox()
-        self._sort_combo.setFixedWidth(160)
+        self._sort_combo.setMinimumWidth(120)
+        self._sort_combo.setMaximumWidth(200)
         for label in [
             "Severity → Path",
             "Kind → Path",
