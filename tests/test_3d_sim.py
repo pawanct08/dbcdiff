@@ -229,16 +229,3 @@ class TestBuildData:
         result = obj._build_data()
         assert len(result["messages"][0]["signals"]) == 8
 
-
-class TestGetTemplate:
-    """ThreeSimWidget._get_template() falls back gracefully when HTML missing."""
-
-    def test_fallback_when_resource_missing(self, tmp_path, monkeypatch):
-        Fake = _import_build_data()
-        # Patch Path.__file__ location so resource won't be found
-        monkeypatch.setattr(
-            "dbcdiff.gui.Path",
-            lambda *args: tmp_path / "nonexistent",
-        )
-        html = Fake._get_template()
-        assert "<html" in html.lower() or html  # some HTML returned

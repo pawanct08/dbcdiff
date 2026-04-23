@@ -650,7 +650,7 @@ class ResultsTable(QTableWidget):
                     "color: #a1a1a6; font-family: 'Courier New'; font-size: 11px; background: transparent;"
                 )
                 path_lay.addWidget(sig_lbl)
-            self.setItemWidget(row, 3, path_w)
+            self.setCellWidget(row, 3, path_w)
 
             # Col 4: Old value — red strikethrough monospace
             old_text = str(e.value_a) if e.value_a is not None else ""
@@ -2577,642 +2577,471 @@ class TemporalHeatmapWidget(QWidget):
         return super().eventFilter(obj, event)
 
 
+# Native PySide6 CAN-bus node-topology simulation — replacement classes.
+# This file is read by _patch_sim.py and spliced into dbcdiff/gui.py.
+
 # ---------------------------------------------------------------------------
-# 3-D Bus Simulation widget  (QWebEngineView + Three.js r128)
+# Native CAN bus node-topology simulation  (pure PySide6 - no WebEngine)
 # ---------------------------------------------------------------------------
 
+
+class _SimCanvas(QWidget):
+    # Animated canvas: ECU nodes on left/right, vertical CAN bus in centre.
+    # Colour-coded packet capsules fly from sender -> bus -> receiver(s).
+    # Click a capsule to emit packetClicked(msg_dict) for inspection.
+
+    packetClicked = Signal(dict)
+
+    _SEV_COLORS = {
+        "breaking":   QColor("#f85149"),
+        "functional": QColor("#e3b341"),
+        "added":      QColor("#3fb950"),
+        "metadata":   QColor("#58a6ff"),
+        "unchanged":  QColor("#8b949e"),
+    }
+    _PALETTE = [QColor(c) for c in (
+        "#58a6ff", "#3fb950", "#e3b341", "#f85149",
+        "#bc8cff", "#ff7b72", "#79c0ff", "#56d364",
+    )]
+    _BG      = QColor("#0d1117")
+    _BUS_COL = QColor("#30363d")
+    _NODE_BG = QColor("#161b22")
+    _TEXT    = QColor("#c9d1d9")
+    _DIM     = QColor("#8b949e")
+    _NODE_W  = 110
+    _NODE_H  = 30
+    _PKT_W   = 14
+    _PKT_H   = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(400, 300)
+        self._nodes_l: list[str]             = []
+        self._nodes_r: list[str]             = []
+        self._node_colors: dict              = {}
+        self._emitters:    list[dict]        = []
+        self._packets:     list[dict]        = []
+        self._speed:       int               = 5
+        self._paused:      bool              = False
+        self._t:           float             = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_data(self, data: dict) -> None:
+        self._packets.clear()
+        self._emitters.clear()
+        self._t = 0.0
+        msgs = data.get("messages", [])
+        mode = data.get("mode", "viewer")
+
+        senders_set: set[str] = set()
+        recvrs_set:  set[str] = set()
+        for m in msgs:
+            for s in (m.get("senders") or []):
+                if s:
+                    senders_set.add(s)
+            for r in (m.get("receivers") or []):
+                if r:
+                    recvrs_set.add(r)
+
+        if not senders_set and not recvrs_set:
+            self._nodes_l = []
+            self._nodes_r = []
+            self._node_colors = {}
+            self.update()
+            return
+
+        self._nodes_l = sorted(senders_set)
+        self._nodes_r = sorted(recvrs_set)
+        all_nodes = sorted(senders_set | recvrs_set)
+        self._node_colors = {
+            n: self._PALETTE[i % len(self._PALETTE)]
+            for i, n in enumerate(all_nodes)
+        }
+
+        for idx, m in enumerate(msgs):
+            sev = m.get("severity")
+            if mode == "diff" and sev:
+                color = self._SEV_COLORS.get(sev, self._DIM)
+            else:
+                color = self._PALETTE[idx % len(self._PALETTE)]
+
+            interval = max(50, int(m.get("cycle_time") or 500))
+            snd_list = m.get("senders")  or ["?"]
+            rcv_list = m.get("receivers") or []
+            for snd in snd_list:
+                si = self._nodes_l.index(snd) if snd in self._nodes_l else 0
+                ri_list = [
+                    self._nodes_r.index(r)
+                    for r in rcv_list if r in self._nodes_r
+                ]
+                self._emitters.append({
+                    "msg":       m,
+                    "color":     color,
+                    "sender":    si,
+                    "receivers": ri_list,
+                    "interval":  interval,
+                    "next_t":    float(idx * 41 % interval),
+                })
+        self.update()
+
+    def set_speed(self, v: int) -> None:
+        self._speed = max(1, v)
+
+    def toggle_pause(self, paused: bool) -> None:
+        self._paused = paused
+
+    # ── Animation ─────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        if self._paused or not self._emitters:
+            return
+        dt = 16.0 * self._speed
+        self._t += dt
+        for pkt in self._packets:
+            pkt["progress"] += dt / pkt["duration"]
+        self._packets = [p for p in self._packets if p["progress"] < 1.05]
+        for em in self._emitters:
+            while self._t >= em["next_t"]:
+                em["next_t"] += em["interval"]
+                targets = em["receivers"] if em["receivers"] else [None]
+                for ri in targets:
+                    self._packets.append({
+                        "msg":      em["msg"],
+                        "color":    em["color"],
+                        "sender":   em["sender"],
+                        "receiver": ri,
+                        "progress": 0.0,
+                        "duration": 700.0,
+                    })
+        self.update()
+
+    # ── Geometry ──────────────────────────────────────────────────────────
+
+    def _node_rect(self, side: str, idx: int) -> QRectF:
+        W, H    = float(self.width()), float(self.height())
+        nodes   = self._nodes_l if side == "L" else self._nodes_r
+        n       = max(len(nodes), 1)
+        pad_top = 40.0
+        avail   = H - pad_top - 20.0
+        slot_h  = avail / n
+        y = pad_top + slot_h * idx + (slot_h - self._NODE_H) / 2
+        x = 10.0 if side == "L" else W - 10.0 - self._NODE_W
+        return QRectF(x, y, self._NODE_W, self._NODE_H)
+
+    def _bus_cx(self) -> float:
+        return self.width() / 2.0
+
+    def _packet_xy(self, pkt: dict) -> tuple:
+        prog = min(pkt["progress"], 1.0)
+        si   = pkt["sender"]
+        ri   = pkt.get("receiver")
+        bx   = self._bus_cx()
+
+        if si < len(self._nodes_l):
+            sr  = self._node_rect("L", si)
+            sx, sy = sr.right(), sr.center().y()
+        else:
+            sx = sy = 0.0
+
+        if ri is not None and ri < len(self._nodes_r):
+            rr  = self._node_rect("R", ri)
+            ex, ey = rr.left(), rr.center().y()
+        else:
+            ex, ey = bx, sy          # broadcast -> stay at bus
+
+        # 3-segment path: horiz-to-bus | vert-on-bus | horiz-to-receiver
+        if prog < 0.40:
+            t = prog / 0.40
+            return sx + (bx - sx) * t, sy
+        elif prog < 0.60:
+            t = (prog - 0.40) / 0.20
+            return bx, sy + (ey - sy) * t
+        else:
+            t = (prog - 0.60) / 0.40
+            return bx + (ex - bx) * t, ey
+
+    # ── Paint ─────────────────────────────────────────────────────────────
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        p.fillRect(0, 0, W, H, self._BG)
+
+        if not self._nodes_l and not self._nodes_r:
+            self._paint_idle(p, W, H)
+            p.end()
+            return
+
+        bx = self._bus_cx()
+
+        # Vertical bus bar
+        bus_pen = QPen(self._BUS_COL, 6)
+        bus_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(bus_pen)
+        p.drawLine(QPointF(bx, 20), QPointF(bx, H - 20))
+
+        # Dashed horizontal spurs from each node to bus
+        spur_pen = QPen(self._BUS_COL, 1, Qt.PenStyle.DashLine)
+        p.setPen(spur_pen)
+        for i in range(len(self._nodes_l)):
+            r  = self._node_rect("L", i)
+            cy = r.center().y()
+            p.drawLine(QPointF(r.right(), cy), QPointF(bx, cy))
+        for i in range(len(self._nodes_r)):
+            r  = self._node_rect("R", i)
+            cy = r.center().y()
+            p.drawLine(QPointF(bx, cy), QPointF(r.left(), cy))
+
+        # Packets drawn first (under node boxes)
+        for pkt in self._packets:
+            self._paint_packet(p, pkt)
+
+        # Node boxes on top
+        for i, name in enumerate(self._nodes_l):
+            self._paint_node(p, "L", i, name)
+        for i, name in enumerate(self._nodes_r):
+            self._paint_node(p, "R", i, name)
+
+        # Column/bus labels
+        lbl_font = p.font()
+        lbl_font.setPointSize(8)
+        p.setFont(lbl_font)
+        p.setPen(QPen(self._DIM))
+        p.drawText(QRectF(bx - 30, 4, 60, 14), Qt.AlignmentFlag.AlignCenter, "CAN Bus")
+        p.drawText(
+            QRectF(10, 4, self._NODE_W, 14), Qt.AlignmentFlag.AlignLeft, "Transmitters"
+        )
+        p.drawText(
+            QRectF(W - self._NODE_W - 10, 4, self._NODE_W, 14),
+            Qt.AlignmentFlag.AlignRight, "Receivers",
+        )
+        p.end()
+
+    def _paint_idle(self, p: QPainter, W: int, H: int) -> None:
+        font = p.font()
+        font.setPointSize(12)
+        p.setFont(font)
+        p.setPen(QPen(self._DIM))
+        p.drawText(
+            QRectF(0, 0, W, H),
+            Qt.AlignmentFlag.AlignCenter,
+            "No data  \u2014  Run Compare or open Visualize",
+        )
+
+    def _paint_node(self, p: QPainter, side: str, idx: int, name: str) -> None:
+        r     = self._node_rect(side, idx)
+        color = self._node_colors.get(name, self._PALETTE[0])
+        p.setPen(QPen(color, 1.5))
+        p.setBrush(QBrush(self._NODE_BG))
+        p.drawRoundedRect(r, 5, 5)
+        font = p.font()
+        font.setPointSize(8)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QPen(self._TEXT))
+        label = p.fontMetrics().elidedText(
+            name, Qt.TextElideMode.ElideRight, int(r.width()) - 8
+        )
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _paint_packet(self, p: QPainter, pkt: dict) -> None:
+        prog = pkt["progress"]
+        if prog >= 1.0:
+            return
+        x, y  = self._packet_xy(pkt)
+        color = QColor(pkt["color"])
+        if prog > 0.80:
+            color.setAlpha(max(0, int(255 * (1.0 - (prog - 0.80) / 0.25))))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        p.drawRoundedRect(
+            QRectF(x - self._PKT_W / 2, y - self._PKT_H / 2, self._PKT_W, self._PKT_H),
+            3, 3,
+        )
+
+    # ── Mouse interaction ─────────────────────────────────────────────────
+
+    def mousePressEvent(self, event) -> None:
+        pos = event.position()
+        px, py = pos.x(), pos.y()
+        best_d, best_pkt = 400.0, None
+        for pkt in self._packets:
+            if pkt["progress"] >= 1.0:
+                continue
+            x, y = self._packet_xy(pkt)
+            d = (px - x) ** 2 + (py - y) ** 2
+            if d < best_d:
+                best_d, best_pkt = d, pkt
+        if best_pkt is not None:
+            self.packetClicked.emit(best_pkt["msg"])
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 
 class ThreeSimWidget(QWidget):
-    """Interactive 3-D CAN bus animation (Three.js inside QWebEngineView).
+    # Native PySide6 CAN bus node-topology simulation (no WebEngine needed).
+    # ECU sender nodes on the left, receiver nodes on the right, a vertical
+    # CAN bus in the centre.  Animated colour-coded packet capsules travel
+    # from each sender node through the bus to its receiver node(s).
+    # Click a capsule to inspect the message details in the side panel.
 
-    X = time (ms, scrolling window)
-    Y = message row (sorted by frame_id)
-    DLC encoded as bar width
-    """
-
-    _FALLBACK_HTML = (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<style>body{background:#0d1117;display:flex;align-items:center;"
-        "justify-content:center;height:100vh;color:#58a6ff;"
-        "font-family:Consolas}</style></head>"
-        "<body><h2>resources/3d_sim.html not found \u2014 "
-        "re-install dbcdiff</h2></body></html>"
-    )
-
-    # Embedded verbatim copy of resources/3d_sim.html.
-    # Storing the HTML here eliminates all runtime file I/O and works in
-    # every deployment: editable install, wheel, PyInstaller onefile exe.
-    _THREE_SIM_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CAN 3D Bus Simulation</title>
-<!-- Three.js r128 (classic non-module build) + OrbitControls -->
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:'Consolas',monospace;overflow:hidden}
-#wrap{width:100vw;height:100vh;position:relative}
-canvas{display:block}
-
-/* \u2500\u2500 Toolbar \u2500\u2500 */
-#tb{
-  position:absolute;top:10px;left:10px;right:10px;
-  display:flex;align-items:center;flex-wrap:wrap;gap:10px;
-  background:rgba(22,27,34,.94);border:1px solid #30363d;
-  border-radius:8px;padding:9px 14px;z-index:20;
-  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)
-}
-#tb h2{font-size:13px;color:#58a6ff;white-space:nowrap;margin:0;user-select:none}
-.cg{display:flex;align-items:center;gap:6px;font-size:11px}
-.cg label{color:#8b949e;white-space:nowrap;user-select:none}
-input[type=range]{accent-color:#3b82f6;width:88px;cursor:pointer}
-select{background:#161b22;color:#e6edf3;border:1px solid #30363d;
-       border-radius:4px;padding:2px 5px;font:11px Consolas;cursor:pointer}
-#pbtn{background:#1a7f37;border:1px solid #2ea043;color:#fff;
-      border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;
-      user-select:none;outline:none}
-#pbtn.pau{background:#9a3412;border-color:#c2410c}
-.badge{background:#1f6feb33;border:1px solid #1f6feb;color:#79c0ff;
-       border-radius:4px;padding:2px 7px;font-size:11px;white-space:nowrap}
-#tdisp{color:#58a6ff;font-size:11px;min-width:60px;user-select:none}
-.hint{margin-left:auto;font-size:10px;color:#484f58;white-space:nowrap;user-select:none}
-
-/* \u2500\u2500 Detail panel \u2500\u2500 */
-#dp{
-  position:absolute;right:10px;top:62px;width:264px;
-  max-height:calc(100vh - 80px);overflow-y:auto;
-  background:rgba(22,27,34,.96);border:1px solid #30363d;
-  border-radius:8px;padding:12px;z-index:30;display:none;
-  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
-#dp h3{font-size:12px;color:#58a6ff;margin-bottom:8px;padding-right:18px;
-        word-break:break-all}
-.dr{display:flex;justify-content:space-between;font-size:11px;
-    padding:3px 0;border-bottom:1px solid #21262d}
-.dr:last-child{border-bottom:none}
-.dl{color:#8b949e;flex-shrink:0;padding-right:6px}
-.dv{color:#e6edf3;font-weight:bold;text-align:right;word-break:break-all}
-#dclose{float:right;cursor:pointer;color:#8b949e;font-size:15px;
-        line-height:1;user-select:none;padding:0 0 2px 4px}
-#dclose:hover{color:#e6edf3}
-.sec{color:#8b949e;font-size:10px;margin:7px 0 3px;text-transform:uppercase;
-     letter-spacing:.05em}
-
-/* \u2500\u2500 Legend \u2500\u2500 */
-#leg{
-  position:absolute;left:10px;bottom:24px;
-  background:rgba(22,27,34,.90);border:1px solid #30363d;
-  border-radius:6px;padding:7px 10px;font-size:11px;z-index:20;
-  user-select:none}
-.li{display:flex;align-items:center;gap:6px;margin:2px 0}
-.ld{width:11px;height:11px;border-radius:2px;flex-shrink:0}
-#leg .sec{margin-bottom:4px}
-
-/* \u2500\u2500 Status bar \u2500\u2500 */
-#sb{
-  position:absolute;bottom:0;left:0;right:0;
-  background:rgba(13,17,23,.95);border-top:1px solid #21262d;
-  padding:3px 10px;font-size:10px;color:#8b949e;z-index:20;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-/* \u2500\u2500 No-data overlay \u2500\u2500 */
-#nd{
-  position:absolute;inset:0;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:14px;
-  background:#0d1117;z-index:50;pointer-events:none}
-#nd.hidden{display:none}
-#nd h2{color:#58a6ff;font-size:18px;margin:0}
-#nd p{color:#8b949e;font-size:13px;margin:0;text-align:center;line-height:1.6}
-</style>
-</head>
-<body>
-<div id="wrap">
-
-  <!-- \u2500\u2500 Toolbar \u2500\u2500 -->
-  <div id="tb">
-    <h2>&#x1F5B2; 3D Bus Sim</h2>
-    <span class="badge" id="mc">0 msgs</span>
-
-    <div class="cg">
-      <label>Speed:</label>
-      <input type="range" id="sps" min="1" max="200" value="10">
-      <span id="spv" style="color:#e6edf3;min-width:38px;font-size:11px">10&times;</span>
-    </div>
-
-    <div class="cg">
-      <label>Baud:</label>
-      <input type="range" id="bds" min="100" max="1000" step="100" value="500">
-      <span id="bdv" style="color:#e6edf3;min-width:62px;font-size:11px">500 kbps</span>
-    </div>
-
-    <div class="cg">
-      <label>Window:</label>
-      <select id="wins">
-        <option value="500">500 ms</option>
-        <option value="1000" selected>1 s</option>
-        <option value="2000">2 s</option>
-        <option value="5000">5 s</option>
-        <option value="10000">10 s</option>
-      </select>
-    </div>
-
-    <button id="pbtn">&#9646;&#9646; Pause</button>
-    <span id="tdisp">0.00 s</span>
-    <span class="hint">Drag&#160;=&#160;orbit&#160;&middot;&#160;Scroll&#160;=&#160;zoom&#160;&middot;&#160;Click&#160;=&#160;info</span>
-  </div>
-
-  <!-- \u2500\u2500 Detail panel \u2500\u2500 -->
-  <div id="dp">
-    <span id="dclose" title="Close">&#x2715;</span>
-    <h3 id="dname">&#8212;</h3>
-    <div id="drows"></div>
-  </div>
-
-  <!-- \u2500\u2500 Legend \u2500\u2500 -->
-  <div id="leg">
-    <div class="sec">Severity</div>
-    <div class="li"><div class="ld" style="background:#da3633"></div>Breaking</div>
-    <div class="li"><div class="ld" style="background:#e3b341"></div>Functional</div>
-    <div class="li"><div class="ld" style="background:#2ea043"></div>Added / Missing</div>
-    <div class="li"><div class="ld" style="background:#58a6ff"></div>Metadata</div>
-    <div class="li"><div class="ld" style="background:#3b82f6"></div>Viewer / Unchanged</div>
-  </div>
-
-  <!-- \u2500\u2500 Status bar \u2500\u2500 -->
-  <div id="sb"><span id="stxt">Loading&#8230;</span></div>
-
-  <!-- \u2500\u2500 No-data overlay \u2500\u2500 -->
-  <div id="nd" class="hidden">
-    <div style="font-size:46px">&#x1F5B2;</div>
-    <h2>No DBC data loaded</h2>
-    <p>Run <b>Compare</b> or open a DBC in <b>Visualize</b> mode<br>
-       to populate the 3D bus scene.</p>
-  </div>
-
-</div><!-- #wrap -->
-
-<!-- \u2500\u2500 Injected data \u2500\u2500 -->
-<script>const CAN_DATA = /*INJECT_DATA*/null/*END_INJECT*/;</script>
-
-<!-- \u2500\u2500 Main scene \u2500\u2500 -->
-<script>
-(function () {
-'use strict';
-
-// \u2500\u2500\u2500 Guard: Three.js available? \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-if (typeof THREE === 'undefined') {
-  document.getElementById('stxt').textContent =
-    'THREE.js failed to load \u2014 check network connection.';
-  document.getElementById('nd').classList.remove('hidden');
-  document.getElementById('nd').querySelector('h2').textContent =
-    'THREE.js could not load';
-  document.getElementById('nd').querySelector('p').textContent =
-    'Check your internet connection. Three.js is loaded from CDN.';
-  return;
-}
-
-// \u2500\u2500\u2500 Data \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var data     = (CAN_DATA && typeof CAN_DATA === 'object') ? CAN_DATA
-               : { mode: 'viewer', messages: [] };
-var messages = (data.messages || []).slice(0, 150);   // cap at 150 rows
-var simMode  = data.mode || 'viewer';
-
-document.getElementById('mc').textContent = messages.length + ' msgs';
-
-if (!messages.length) {
-  document.getElementById('nd').classList.remove('hidden');
-  document.getElementById('stxt').textContent = 'No messages \u2014 load a DBC first.';
-  return;
-}
-
-// \u2500\u2500\u2500 Colour helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var SEV_HEX = {
-  breaking:  0xda3633,
-  functional:0xe3b341,
-  added:     0x2ea043,
-  metadata:  0x58a6ff,
-  unchanged: 0x3b82f6,
-};
-var VIEW_PAL = [
-  0x3b82f6, 0x10b981, 0xf59e0b, 0xa855f7,
-  0xef4444, 0x06b6d4, 0xf97316, 0x84cc16,
-  0xec4899, 0x8b5cf6, 0x14b8a6, 0xfbbf24,
-];
-function msgColor(msg, idx) {
-  if (simMode === 'diff' && msg.severity && SEV_HEX[msg.severity] !== undefined) {
-    return SEV_HEX[msg.severity];
-  }
-  return VIEW_PAL[idx % VIEW_PAL.length];
-}
-function brightenHex(hex, f) {
-  var r = Math.min(1, ((hex >> 16 & 0xff) / 255) * f);
-  var g = Math.min(1, ((hex >>  8 & 0xff) / 255) * f);
-  var b = Math.min(1, ((hex       & 0xff) / 255) * f);
-  return new THREE.Color(r, g, b);
-}
-
-// \u2500\u2500\u2500 Renderer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var wrap     = document.getElementById('wrap');
-var renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(wrap.clientWidth, wrap.clientHeight);
-renderer.setClearColor(0x0d1117);
-wrap.insertBefore(renderer.domElement, wrap.firstChild);
-
-// \u2500\u2500\u2500 Scene + Camera \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var scene  = new THREE.Scene();
-scene.fog  = new THREE.Fog(0x0d1117, 90, 240);
-
-var camera = new THREE.PerspectiveCamera(
-  50, wrap.clientWidth / wrap.clientHeight, 0.1, 500
-);
-
-// \u2500\u2500\u2500 OrbitControls \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var controls         = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping  = true;
-controls.dampingFactor  = 0.07;
-controls.screenSpacePanning = false;
-
-// \u2500\u2500\u2500 Lighting \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-scene.add(new THREE.AmbientLight(0xffffff, 0.50));
-var dlight = new THREE.DirectionalLight(0xffffff, 0.75);
-dlight.position.set(18, 28, 18);
-scene.add(dlight);
-var dlight2 = new THREE.DirectionalLight(0x8896aa, 0.25);
-dlight2.position.set(-12, -12, -12);
-scene.add(dlight2);
-
-// \u2500\u2500\u2500 Layout constants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var ROW_H   = 1.15;   // Y units between message rows
-var X_LEN   = 42;     // Width of the visible time window (world units)
-var N       = messages.length;
-var sceneH  = N * ROW_H;
-
-// \u2500\u2500\u2500 Grid \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var grid = new THREE.GridHelper(X_LEN * 1.5, 44, 0x161b22, 0x161b22);
-grid.position.set(X_LEN / 2, -0.7, 0);
-scene.add(grid);
-
-// \u2500\u2500\u2500 Axis lines \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function addLine(x0,y0,z0, x1,y1,z1, color) {
-  var geo = new THREE.BufferGeometry();
-  geo.setFromPoints([
-    new THREE.Vector3(x0,y0,z0),
-    new THREE.Vector3(x1,y1,z1)
-  ]);
-  scene.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: color })));
-}
-addLine(-0.5, -0.5, 0,  X_LEN + 1.5, -0.5, 0, 0x58a6ff);  // X-axis (time)
-addLine(-0.5, -0.5, 0,  -0.5, sceneH + 0.5, 0, 0x2ea043);  // Y-axis (msgs)
-
-// \u2500\u2500\u2500 Sprites \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function makeTextSprite(text, fillColor, fontSize) {
-  var c = document.createElement('canvas');
-  c.width = 256; c.height = 64;
-  var ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, 256, 64);
-  ctx.font = (fontSize || 11) + 'px Consolas,monospace';
-  ctx.fillStyle = fillColor || '#8b949e';
-  ctx.fillText(text, 4, 44);
-  var tex = new THREE.CanvasTexture(c);
-  tex.minFilter = THREE.LinearFilter;
-  var mat = new THREE.SpriteMaterial({ map: tex, transparent: true,
-                                       depthWrite: false, depthTest: false });
-  return new THREE.Sprite(mat);
-}
-
-// Row labels: frame_id hex
-messages.forEach(function(msg, i) {
-  var sp = makeTextSprite(
-    '0x' + msg.frame_id.toString(16).toUpperCase().padStart(3, '0'),
-    '#484f58', 10
-  );
-  sp.position.set(-3.2, i * ROW_H + ROW_H / 2, 0);
-  sp.scale.set(4.8, 1.2, 1);
-  scene.add(sp);
-});
-
-// X-axis tick labels \u2014 rebuilt when windowMs changes
-var xLabels = [];
-function rebuildXLabels(winMs) {
-  xLabels.forEach(function(s){ scene.remove(s); });
-  xLabels.length = 0;
-  [0, 0.25, 0.5, 0.75, 1.0].forEach(function(f) {
-    var sp = makeTextSprite(Math.round(f * winMs) + 'ms', '#58a6ff', 10);
-    sp.position.set(f * X_LEN, -1.35, 0);
-    sp.scale.set(4, 1, 1);
-    scene.add(sp);
-    xLabels.push(sp);
-  });
-}
-rebuildXLabels(1000);
-
-// \u2500\u2500\u2500 Camera initial position \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var cY = sceneH / 2;
-camera.position.set(X_LEN / 2, cY + Math.max(12, N * 0.6), 30);
-controls.target.set(X_LEN / 2, cY, 0);
-controls.update();
-
-// \u2500\u2500\u2500 Emitters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// One "emitter" per message. Each fires BoxGeometry capsules at cycle_time rate.
-var emitters = messages.map(function(msg, i) {
-  var hex    = msgColor(msg, i);
-  var baseC  = new THREE.Color(hex);
-  var dlc    = Math.max(1, Math.min(8, msg.dlc || 8));
-  var bw     = dlc * 0.30 + 0.40;           // bar width in world units proportional to DLC
-  var bh     = 0.38;
-  var bd     = 0.38;
-  var geo    = new THREE.BoxGeometry(bw, bh, bd);
-  var eGeo   = new THREE.EdgesGeometry(geo);
-
-  var mat    = new THREE.MeshPhongMaterial({
-    color: baseC, emissive: baseC, emissiveIntensity: 0.22,
-    shininess: 80, transparent: true, opacity: 0.88,
-    depthWrite: true,
-  });
-  var eMat   = new THREE.LineBasicMaterial({
-    color: brightenHex(hex, 1.5),
-    transparent: true, opacity: 0.60,
-  });
-
-  return {
-    msg:      msg,
-    yPos:     i * ROW_H + ROW_H / 2,
-    cycleMs:  msg.cycle_time || 0,
-    geo: geo, eGeo: eGeo,
-    mat: mat, eMat: eMat,
-    capsules: [],    // { mesh, birthSimMs }
-    nextFireMs: 0,
-    hex: hex,
-  };
-});
-
-// \u2500\u2500\u2500 Animation state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var simMs    = 0.0;
-var paused   = false;
-var speedMul = 10;
-var windowMs = 1000;
-var lastReal = performance.now();
-var MAX_CAP  = 60;   // max active capsules per emitter
-
-// \u2500\u2500\u2500 Toolbar wiring \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var spsEl = document.getElementById('sps');
-var spvEl = document.getElementById('spv');
-spsEl.addEventListener('input', function() {
-  speedMul = +spsEl.value;
-  spvEl.textContent = speedMul + '\u00d7';
-});
-
-var bdsEl = document.getElementById('bds');
-var bdvEl = document.getElementById('bdv');
-bdsEl.addEventListener('input', function() {
-  var b  = +bdsEl.value;
-  bdvEl.textContent = b + ' kbps';
-  // Cosmetic: adjust base opacity for emitters + all live capsules
-  var baseOp = 0.48 + (b / 1000) * 0.44;
-  emitters.forEach(function(em) {
-    em.mat.opacity = baseOp;
-    em.capsules.forEach(function(c){ c.mesh.material.opacity = baseOp; });
-  });
-});
-
-var winsEl = document.getElementById('wins');
-winsEl.addEventListener('change', function() {
-  windowMs = +winsEl.value;
-  rebuildXLabels(windowMs);
-  // Reset nextFireMs
-  emitters.forEach(function(em){ em.nextFireMs = simMs; });
-});
-
-var pbtn = document.getElementById('pbtn');
-pbtn.addEventListener('click', function() {
-  paused = !paused;
-  pbtn.innerHTML  = paused ? '&#9654; Play' : '&#9646;&#9646; Pause';
-  pbtn.className  = paused ? 'pau' : '';
-  if (!paused) lastReal = performance.now();
-});
-
-// \u2500\u2500\u2500 Raycaster / click detection \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-var ray   = new THREE.Raycaster();
-var mouse = new THREE.Vector2();
-renderer.domElement.addEventListener('click', function(ev) {
-  var r   = renderer.domElement.getBoundingClientRect();
-  mouse.x =  ((ev.clientX - r.left) / r.width)  * 2 - 1;
-  mouse.y = -((ev.clientY - r.top)  / r.height) * 2 + 1;
-  ray.setFromCamera(mouse, camera);
-
-  var meshToEm = new Map();
-  emitters.forEach(function(em) {
-    em.capsules.forEach(function(c){ meshToEm.set(c.mesh, em); });
-  });
-
-  var hits = ray.intersectObjects(Array.from(meshToEm.keys()), false);
-  if (hits.length) {
-    var em = meshToEm.get(hits[0].object);
-    if (em) showDetail(em.msg);
-  }
-}, false);
-
-// \u2500\u2500\u2500 Detail panel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function showDetail(msg) {
-  // Pause on click
-  if (!paused) {
-    paused = true;
-    pbtn.innerHTML = '&#9654; Play';
-    pbtn.className = 'pau';
-  }
-  document.getElementById('dname').textContent = msg.name;
-  var rows = [
-    ['Frame ID',  '0x' + msg.frame_id.toString(16).toUpperCase().padStart(3,'0')],
-    ['DLC',       msg.dlc + ' bytes'],
-    ['Cycle',     msg.cycle_time ? msg.cycle_time + ' ms' : '\u2014'],
-    ['Senders',   (msg.senders || []).join(', ') || '\u2014'],
-    ['Receivers', (msg.receivers || []).join(', ') || '\u2014'],
-    ['Signals',   '' + (msg.signal_count || 0)],
-  ];
-  if (msg.severity) {
-    rows.push(['Severity', msg.severity]);
-  }
-  if (msg.comment) {
-    rows.push(['Comment',  msg.comment]);
-  }
-  var html = rows.map(function(r) {
-    return '<div class="dr">'
-         + '<span class="dl">' + r[0] + '</span>'
-         + '<span class="dv">' + escHtml(r[1]) + '</span></div>';
-  }).join('');
-  if (msg.signals && msg.signals.length) {
-    html += '<div class="sec">Signals</div>';
-    msg.signals.forEach(function(s) {
-      html += '<div class="dr">'
-            + '<span class="dl">' + escHtml(s.name) + '</span>'
-            + '<span class="dv" style="font-size:10px">'
-            + s.start_bit + ':' + s.length + 'b'
-            + (s.is_signed ? ' S' : ' U') + '</span></div>';
-    });
-  }
-  document.getElementById('drows').innerHTML = html;
-  document.getElementById('dp').style.display = 'block';
-}
-
-document.getElementById('dclose').addEventListener('click', function() {
-  document.getElementById('dp').style.display = 'none';
-}, false);
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
-}
-
-// \u2500\u2500\u2500 Main animation loop \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function animate() {
-  requestAnimationFrame(animate);
-
-  if (!paused) {
-    var now   = performance.now();
-    var dtR   = Math.min(now - lastReal, 100);  // clamp to 100ms to avoid jumps
-    lastReal  = now;
-    var dtSim = dtR * speedMul;
-    simMs    += dtSim;
-
-    document.getElementById('tdisp').textContent = (simMs / 1000).toFixed(2) + ' s';
-
-    var totalActive = 0;
-    emitters.forEach(function(em) {
-      if (!em.cycleMs) return;  // skip non-cyclic (cycle_time == 0)
-
-      // Fire new capsule(s)
-      while (em.capsules.length < MAX_CAP && simMs >= em.nextFireMs) {
-        var cMat = em.mat.clone();              // per-capsule material for opacity
-        var mesh = new THREE.Mesh(em.geo, cMat);
-        mesh.add(new THREE.LineSegments(em.eGeo, em.eMat));
-        scene.add(mesh);
-        em.capsules.push({ mesh: mesh, mat: cMat, birthMs: em.nextFireMs });
-        em.nextFireMs += em.cycleMs;
-      }
-      // If sim jumped ahead skip to current
-      if (simMs > em.nextFireMs + em.cycleMs * 2) {
-        em.nextFireMs = simMs;
-      }
-
-      // Advance positions and remove stale capsules
-      var alive = [];
-      for (var k = 0; k < em.capsules.length; k++) {
-        var cap = em.capsules[k];
-        var age = simMs - cap.birthMs;
-        if (age > windowMs * 1.05) {
-          scene.remove(cap.mesh);
-          cap.mat.dispose();
-          continue;
-        }
-        var xf = (age / windowMs) * X_LEN;
-        // Fade out in last 20% of window
-        var t  = age / windowMs;
-        cap.mat.opacity = t > 0.80 ? Math.max(0, (1 - t) / 0.20 * 0.88) : 0.88;
-        cap.mesh.position.set(xf, em.yPos, 0);
-        alive.push(cap);
-        totalActive++;
-      }
-      em.capsules = alive;
-    });
-
-    document.getElementById('stxt').textContent =
-      'Sim: ' + (simMs / 1000).toFixed(2) +
-      's  |  Active capsules: ' + totalActive +
-      '  |  Drag to orbit  \u00b7  Click a box for details';
-  }
-
-  controls.update();
-  renderer.render(scene, camera);
-}
-
-// \u2500\u2500\u2500 Resize \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-window.addEventListener('resize', function() {
-  var w = wrap.clientWidth, h = wrap.clientHeight;
-  camera.aspect = w / h;;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-}, false);
-
-// \u2500\u2500\u2500 Start \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-document.getElementById('stxt').textContent =
-  'Loaded ' + messages.length + ' messages  \u2014  animation running.';
-animate();
-
-}()); // end IIFE
-</script>
-</body>
-</html>"""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._db               = None
-        self._entries: list    = []
-        self._sim_mode: str    = "viewer"
+        self._db       = None
+        self._entries: list = []
+        self._sim_mode = "viewer"
 
+        # -- Toolbar -------------------------------------------------------
+        toolbar = QWidget()
+        toolbar.setFixedHeight(36)
+        tl = QHBoxLayout(toolbar)
+        tl.setContentsMargins(8, 4, 8, 4)
+        tl.setSpacing(6)
+        tl.addWidget(QLabel("\u26a1 Speed:"))
+        self._speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self._speed_slider.setRange(1, 50)
+        self._speed_slider.setValue(5)
+        self._speed_slider.setFixedWidth(120)
+        tl.addWidget(self._speed_slider)
+        self._speed_lbl = QLabel("5\u00d7")
+        self._speed_lbl.setFixedWidth(28)
+        tl.addWidget(self._speed_lbl)
+        tl.addSpacing(12)
+        self._pause_btn = QPushButton("\u23f8  Pause")
+        self._pause_btn.setCheckable(True)
+        self._pause_btn.setFixedWidth(90)
+        tl.addWidget(self._pause_btn)
+        tl.addStretch()
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
+        tl.addWidget(self._status_lbl)
+
+        # -- Canvas --------------------------------------------------------
+        self._canvas = _SimCanvas()
+
+        # -- Detail panel --------------------------------------------------
+        self._detail = QFrame()
+        self._detail.setFrameStyle(QFrame.Shape.StyledPanel)
+        self._detail.setStyleSheet(
+            "QFrame{background:#161b22;border:1px solid #30363d;border-radius:6px}"
+        )
+        self._detail.setFixedWidth(230)
+        self._detail.setVisible(False)
+        dl = QVBoxLayout(self._detail)
+        dl.setContentsMargins(10, 8, 10, 8)
+        self._detail_lbl = QLabel()
+        self._detail_lbl.setWordWrap(True)
+        self._detail_lbl.setStyleSheet("color:#c9d1d9;font-size:12px")
+        dl.addWidget(self._detail_lbl)
+        dl.addStretch()
+        close_btn = QPushButton("\u2715  Close")
+        close_btn.clicked.connect(lambda: self._detail.setVisible(False))
+        close_btn.setFixedHeight(26)
+        dl.addWidget(close_btn)
+
+        # -- Root layout ---------------------------------------------------
+        content = QHBoxLayout()
+        content.setSpacing(4)
+        content.addWidget(self._canvas, 1)
+        content.addWidget(self._detail)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        root.addWidget(toolbar)
+        root.addLayout(content, 1)
 
-        if _WEB_ENGINE_OK and _QWebEngineView is not None:
-            self._view = _QWebEngineView()
-            root.addWidget(self._view)
-            self._view.setHtml(self._idle_html())
-        else:
-            self._view = None
-            msg = QLabel(
-                "<div style='text-align:center'>"
-                "<h2 style='color:#58a6ff'>\U0001f5b2\ufe0f\u00a0 3D Bus Sim</h2>"
-                "<p style='color:#8b949e;margin-top:8px'>"
-                "PySide6-WebEngine is not installed.</p>"
-                "<code style='background:#161b22;border:1px solid #30363d;"
-                "padding:6px 14px;border-radius:4px;display:inline-block;"
-                "margin-top:10px'>pip install PySide6-WebEngine</code>"
-                "<p style='color:#8b949e;margin-top:8px;font-size:11px'>"
-                "Then restart dbcdiff.</p></div>"
+        # -- Signal wiring -------------------------------------------------
+        self._speed_slider.valueChanged.connect(self._on_speed)
+        self._pause_btn.toggled.connect(self._canvas.toggle_pause)
+        self._canvas.packetClicked.connect(self._show_detail)
+
+    # -- Internal slots ----------------------------------------------------
+
+    def _on_speed(self, v: int) -> None:
+        self._speed_lbl.setText(f"{v}\u00d7")
+        self._canvas.set_speed(v)
+
+    def _show_detail(self, msg: dict) -> None:
+        name      = msg.get("name",       "?")
+        fid       = msg.get("frame_id",   0)
+        dlc       = msg.get("dlc",        0)
+        cycle     = msg.get("cycle_time", 0)
+        senders   = msg.get("senders")   or []
+        receivers = msg.get("receivers") or []
+        comment   = msg.get("comment",   "")
+        sev       = msg.get("severity")
+        signals   = msg.get("signals")   or []
+        sig_count = msg.get("signal_count", 0)
+        _SEV_C = {
+            "breaking": "#f85149", "functional": "#e3b341",
+            "added":    "#3fb950", "metadata":   "#58a6ff",
+        }
+        lines = [
+            f"<b style='font-size:13px'>{name}</b>",
+            f"ID: 0x{fid:X} &nbsp; DLC: {dlc}",
+            f"Cycle: {cycle} ms",
+        ]
+        if senders:
+            lines.append(f"TX: {', '.join(senders)}")
+        if receivers:
+            lines.append(f"RX: {', '.join(receivers)}")
+        if sev:
+            c = _SEV_C.get(sev, "#8b949e")
+            lines.append(f"Severity: <b style='color:{c}'>{sev}</b>")
+        if comment:
+            lines.append(f"<i style='color:#8b949e'>{comment[:100]}</i>")
+        lines.append(f"<hr style='border-color:#30363d'>Signals ({sig_count}):")
+        for s in signals[:10]:
+            lines.append(
+                f"\u00b7 {s['name']}"
+                f" &nbsp;[{s['start_bit']}:{s['length']}]"
+                + (" <i>signed</i>" if s.get("is_signed") else "")
             )
-            msg.setTextFormat(Qt.TextFormat.RichText)
-            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            msg.setStyleSheet("background:#0d1117;padding:40px;")
-            root.addWidget(msg)
+        if sig_count > 10:
+            lines.append(f"<i>\u2026 {sig_count - 10} more</i>")
+        self._detail_lbl.setText("<br>".join(lines))
+        self._detail.setVisible(True)
 
-    def load(self, db, entries: list | None = None, mode: str = "viewer") -> None:
-        """Populate the 3-D scene from *db* (cantools Database) and diff *entries*."""
-        if self._view is None:
-            return
+    # -- Public API (identical signatures to old WebEngine version) ---------
+
+    def load(self, db, entries=None, mode: str = "viewer") -> None:
         self._db       = db
         self._entries  = list(entries or [])
         self._sim_mode = mode
         self._refresh()
 
     def _refresh(self) -> None:
-        if self._view is None or self._db is None:
+        if self._db is None:
             return
-        import json as _j
-        html = self._get_template().replace(
-            "/*INJECT_DATA*/null/*END_INJECT*/",
-            _j.dumps(self._build_data(), separators=(",", ":")),
+        data  = self._build_data()
+        msgs  = data.get("messages", [])
+        nodes = {
+            n
+            for m in msgs
+            for n in (m.get("senders") or []) + (m.get("receivers") or [])
+        }
+        self._status_lbl.setText(
+            f"{len(msgs)} message(s)  \u00b7  {len(nodes)} node(s)"
         )
-        self._view.setHtml(html)
+        self._canvas.set_data(data)
+        self._detail.setVisible(False)
 
     def _build_data(self) -> dict:
-        _rank = {"breaking": 4, "functional": 3, "added": 2, "metadata": 1}
+        if self._db is None:
+            return {"mode": self._sim_mode, "messages": []}
         sev: dict[str, str] = {}
-        if self._sim_mode == "diff":
-            for e in self._entries:
-                parts = (getattr(e, "path", "") or "").split(".")
-                if len(parts) >= 2 and parts[0] == "messages":
-                    nm = parts[1]
-                    sr = getattr(e.severity, "name", "METADATA").lower()
-                    if getattr(e, "kind", "") in ("extra", "missing"):
-                        sr = "added"
-                    if _rank.get(sr, 0) > _rank.get(sev.get(nm, ""), 0):
-                        sev[nm] = sr
+        for e in (self._entries or []):
+            sr = getattr(e, "severity", None)
+            if sr is not None:
+                nm = getattr(e, "message_name", None) or getattr(e, "name", None)
+                if nm:
+                    sev[nm] = sr
         msgs = []
         for m in sorted(self._db.messages, key=lambda x: x.frame_id):
             msgs.append({
@@ -3238,29 +3067,6 @@ animate();
             })
         return {"mode": self._sim_mode, "messages": msgs}
 
-    @staticmethod
-    def _get_template() -> str:
-        # HTML is embedded as _THREE_SIM_HTML — no file I/O, works in all
-        # environments: dev install, wheel, PyInstaller onefile exe.
-        return ThreeSimWidget._THREE_SIM_HTML
-
-    @staticmethod
-    def _idle_html() -> str:
-        return (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<style>*{margin:0;padding:0}body{background:#0d1117;"
-            "display:flex;flex-direction:column;align-items:center;"
-            "justify-content:center;height:100vh;color:#c9d1d9;"
-            "font-family:Consolas,monospace;gap:14px}"
-            "h2{color:#58a6ff;font-size:18px}"
-            "p{color:#8b949e;font-size:13px;text-align:center}</style>"
-            "</head><body>"
-            "<div style='font-size:48px'>\U0001f5b2\ufe0f</div>"
-            "<h2>3D Bus Simulation</h2>"
-            "<p>Run <b>Compare</b> or open <b>Visualize</b> mode<br>"
-            "to populate the 3D scene.</p>"
-            "</body></html>"
-        )
 
 
 # ---------------------------------------------------------------------------
