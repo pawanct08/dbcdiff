@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Optional
 
-from dbcdiff.protocol import classify_message
+from dbcdiff.protocol import classify_subtype
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -645,7 +645,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
                 value_b=mb_a.name,
                 detail=f"renamed {ma_r.name!r} → {mb_a.name!r}",
                 protocol=protocol,
-                msg_type=classify_message(mb_a),
+                msg_type=classify_subtype(mb_a),
             ))
 
     for key in removed_keys:
@@ -655,7 +655,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
         entries.append(DiffEntry("message", REMOVED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
                                   value_a=m.name, protocol=protocol,
-                                  msg_type=classify_message(m)))
+                                  msg_type=classify_subtype(m)))
 
     for key in added_keys:
         if key in rename_added_keys:
@@ -664,7 +664,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
         entries.append(DiffEntry("message", ADDED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
                                   value_b=m.name, protocol=protocol,
-                                  msg_type=classify_message(m)))
+                                  msg_type=classify_subtype(m)))
 
     for key in sorted(msgs_a.keys() & msgs_b.keys()):
         ma, mb = msgs_a[key], msgs_b[key]
@@ -680,7 +680,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
             protocol=protocol,
         )
         for _ent in msg_fields:
-            _ent.msg_type = classify_message(mb)
+            _ent.msg_type = classify_subtype(mb)
             if (_ent.kind == CHANGED
                     and _ent.path == f"{prefix}.cycle_time"
                     and _ent.value_a and _ent.value_b):
