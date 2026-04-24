@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Optional
 
-from dbcdiff.protocol import classify_subtype
+from dbcdiff.protocol import classify_protocol, classify_subtype
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -644,7 +644,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
                 value_a=ma_r.name,
                 value_b=mb_a.name,
                 detail=f"renamed {ma_r.name!r} → {mb_a.name!r}",
-                protocol=protocol,
+                protocol=classify_protocol(ma_r),
                 msg_type=classify_subtype(mb_a),
             ))
 
@@ -654,7 +654,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
         m = msgs_a[key]
         entries.append(DiffEntry("message", REMOVED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
-                                  value_a=m.name, protocol=protocol,
+                                  value_a=m.name, protocol=classify_protocol(m),
                                   msg_type=classify_subtype(m)))
 
     for key in added_keys:
@@ -663,11 +663,12 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
         m = msgs_b[key]
         entries.append(DiffEntry("message", ADDED, Severity.BREAKING,
                                   f"message.{m.name}(0x{m.frame_id:X})",
-                                  value_b=m.name, protocol=protocol,
+                                  value_b=m.name, protocol=classify_protocol(m),
                                   msg_type=classify_subtype(m)))
 
     for key in sorted(msgs_a.keys() & msgs_b.keys()):
         ma, mb = msgs_a[key], msgs_b[key]
+        _proto = classify_protocol(ma)
         prefix = f"message.{ma.name}(0x{ma.frame_id:X})"
 
         msg_fields = _compare_fields(
@@ -677,7 +678,7 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
                 (_MSG_FUNCTIONAL,  Severity.FUNCTIONAL),
                 (_MSG_METADATA,    Severity.METADATA),
             ],
-            protocol=protocol,
+            protocol=_proto,
         )
         for _ent in msg_fields:
             _ent.msg_type = classify_subtype(mb)
@@ -703,10 +704,10 @@ def _diff_messages(db_a, db_b, protocol: str = "", baud_rate: int = 500_000) -> 
             "attribute", prefix,
             _dbc_attr_dict(ma),
             _dbc_attr_dict(mb),
-            protocol=protocol,
+            protocol=_proto,
         ))
 
-        entries.extend(_diff_signals(prefix, ma, mb, protocol))
+        entries.extend(_diff_signals(prefix, ma, mb, _proto))
 
     return entries
 
