@@ -279,6 +279,259 @@ QLineEdit {
     border-radius: 6px;
     padding: 4px 8px;
 }
+QProgressBar {
+    background-color: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    color: transparent;
+    height: 6px;
+}
+QProgressBar::chunk {
+    background-color: #1f6feb;
+    border-radius: 4px;
+}
+
+/* ---- Sidebar shell ---- */
+QFrame#sidebar {
+    background-color: #111417;
+    border-right: 1px solid #1e2228;
+}
+QFrame#logoBlock {
+    background-color: #111417;
+    border-bottom: 1px solid #1e2228;
+    border-radius: 8px;
+}
+QLabel#logoMark {
+    background-color: #1f6feb;
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 700;
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    border-radius: 8px;
+    qproperty-alignment: AlignCenter;
+    padding: 0px;
+}
+QLabel#logoTitle {
+    color: #e6edf3;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+QLabel#logoSubtitle {
+    color: #636368;
+    font-size: 10px;
+}
+QLabel#logoVersion {
+    color: #636368;
+    font-size: 10px;
+}
+QLabel#sectionLabel {
+    color: #636368;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+}
+
+/* ---- Sidebar mode / view buttons ---- */
+QPushButton#modeButton {
+    text-align: left;
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: #8b949e;
+    font-size: 13px;
+}
+QPushButton#modeButton:hover {
+    background-color: #1c1f23;
+    color: #e6edf3;
+}
+QPushButton#modeButton:checked {
+    background-color: #1f2937;
+    color: #58a6ff;
+    font-weight: 600;
+}
+QPushButton#viewButton {
+    text-align: left;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: #8b949e;
+    font-size: 12px;
+}
+QPushButton#viewButton:hover {
+    background-color: #1c1f23;
+    color: #e6edf3;
+}
+QPushButton#viewButton:checked {
+    background-color: #1c1f23;
+    color: #e6edf3;
+}
+
+/* ---- Ghost & CTA buttons in sidebar ---- */
+QPushButton#ghostButton {
+    background-color: transparent;
+    border: 1px solid #30363d;
+    color: #8b949e;
+    font-size: 12px;
+    padding: 5px 12px;
+}
+QPushButton#ghostButton:hover {
+    background-color: #1c1f23;
+    color: #e6edf3;
+    border-color: #58a6ff;
+}
+QPushButton#compareCta {
+    background-color: #1f6feb;
+    border: none;
+    border-radius: 6px;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 16px;
+    min-height: 34px;
+}
+QPushButton#compareCta:hover {
+    background-color: #388bfd;
+}
+QPushButton#compareCta:disabled {
+    background-color: #1c2230;
+    color: #3d4b5c;
+}
+
+/* ---- File pills ---- */
+QFrame#filePill {
+    background-color: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+}
+QLabel#pillCaption {
+    color: #8b949e;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+QLabel#filePillBadgeNew {
+    background-color: #1b3050;
+    color: #58a6ff;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    padding: 2px 5px;
+}
+QLabel#filePillBadgeOld {
+    background-color: #2c1e45;
+    color: #a371f7;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    padding: 2px 5px;
+}
+QLabel#filePillValue {
+    color: #c9d1d9;
+    font-size: 11px;
+}
+
+/* ---- Topbar ---- */
+QFrame#topbar {
+    background-color: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+}
+QLabel#pageTitle {
+    color: #e6edf3;
+    font-size: 17px;
+    font-weight: 700;
+}
+QLabel#pageSubtitle {
+    color: #8b949e;
+    font-size: 12px;
+}
+
+/* ---- Severity chips ---- */
+QLabel#chipBreaking {
+    background-color: rgba(255, 69, 58, 0.12);
+    color: #ff453a;
+    border: 1px solid rgba(255, 69, 58, 0.28);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chipFunctional {
+    background-color: rgba(255, 159, 10, 0.12);
+    color: #ff9f0a;
+    border: 1px solid rgba(255, 159, 10, 0.28);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chipAdded {
+    background-color: rgba(48, 209, 88, 0.12);
+    color: #30d158;
+    border: 1px solid rgba(48, 209, 88, 0.28);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chipMetadata {
+    background-color: rgba(191, 90, 242, 0.12);
+    color: #bf5af2;
+    border: 1px solid rgba(191, 90, 242, 0.28);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* ---- Export buttons ---- */
+QPushButton#exportButton {
+    background-color: #21262d;
+    border: 1px solid #30363d;
+    color: #8b949e;
+    font-size: 12px;
+    padding: 5px 12px;
+}
+QPushButton#exportButton:hover {
+    background-color: #30363d;
+    color: #e6edf3;
+}
+QPushButton#exportButtonPrimary {
+    background-color: #0f2918;
+    border: 1px solid #2ea043;
+    color: #3fb950;
+    font-size: 12px;
+    padding: 5px 12px;
+}
+QPushButton#exportButtonPrimary:hover {
+    background-color: #2ea043;
+    color: #ffffff;
+}
+
+/* ---- Summary wrap & filter bar ---- */
+QFrame#summaryWrap {
+    background-color: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+}
+QFrame#filterBar {
+    background-color: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+}
+QFrame#modePageCard {
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+}
 """
 
 # ---------------------------------------------------------------------------
@@ -424,6 +677,260 @@ QLineEdit {
     border: 1px solid #d0d7de;
     border-radius: 6px;
     padding: 4px 8px;
+}
+QProgressBar {
+    background-color: #eaeef2;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    color: transparent;
+    height: 6px;
+}
+QProgressBar::chunk {
+    background-color: #0969da;
+    border-radius: 4px;
+}
+
+/* ---- Sidebar shell ---- */
+QFrame#sidebar {
+    background-color: #f6f8fa;
+    border-right: 1px solid #d0d7de;
+}
+QFrame#logoBlock {
+    background-color: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+    border-radius: 8px;
+}
+QLabel#logoMark {
+    background-color: #0969da;
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 700;
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    border-radius: 8px;
+    qproperty-alignment: AlignCenter;
+    padding: 0px;
+}
+QLabel#logoTitle {
+    color: #24292f;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+QLabel#logoSubtitle {
+    color: #57606a;
+    font-size: 10px;
+}
+QLabel#logoVersion {
+    color: #57606a;
+    font-size: 10px;
+}
+QLabel#sectionLabel {
+    color: #57606a;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+}
+
+/* ---- Sidebar mode / view buttons ---- */
+QPushButton#modeButton {
+    text-align: left;
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: #57606a;
+    font-size: 13px;
+}
+QPushButton#modeButton:hover {
+    background-color: #eaeef2;
+    color: #24292f;
+}
+QPushButton#modeButton:checked {
+    background-color: #dbeafe;
+    color: #0969da;
+    font-weight: 600;
+}
+QPushButton#viewButton {
+    text-align: left;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: #57606a;
+    font-size: 12px;
+}
+QPushButton#viewButton:hover {
+    background-color: #eaeef2;
+    color: #24292f;
+}
+QPushButton#viewButton:checked {
+    background-color: #eaeef2;
+    color: #24292f;
+    font-weight: 600;
+}
+
+/* ---- Ghost & CTA buttons in sidebar ---- */
+QPushButton#ghostButton {
+    background-color: transparent;
+    border: 1px solid #d0d7de;
+    color: #57606a;
+    font-size: 12px;
+    padding: 5px 12px;
+}
+QPushButton#ghostButton:hover {
+    background-color: #eaeef2;
+    color: #24292f;
+    border-color: #0969da;
+}
+QPushButton#compareCta {
+    background-color: #0969da;
+    border: none;
+    border-radius: 6px;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 16px;
+    min-height: 34px;
+}
+QPushButton#compareCta:hover {
+    background-color: #0860c9;
+}
+QPushButton#compareCta:disabled {
+    background-color: #eaeef2;
+    color: #8c959f;
+}
+
+/* ---- File pills ---- */
+QFrame#filePill {
+    background-color: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+}
+QLabel#pillCaption {
+    color: #57606a;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+QLabel#filePillBadgeNew {
+    background-color: #dbeafe;
+    color: #0969da;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    padding: 2px 5px;
+}
+QLabel#filePillBadgeOld {
+    background-color: #ede9fe;
+    color: #7c3aed;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    padding: 2px 5px;
+}
+QLabel#filePillValue {
+    color: #24292f;
+    font-size: 11px;
+}
+
+/* ---- Topbar ---- */
+QFrame#topbar {
+    background-color: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+}
+QLabel#pageTitle {
+    color: #24292f;
+    font-size: 17px;
+    font-weight: 700;
+}
+QLabel#pageSubtitle {
+    color: #57606a;
+    font-size: 12px;
+}
+
+/* ---- Severity chips ---- */
+QLabel#chipBreaking {
+    background-color: rgba(207, 34, 46, 0.08);
+    color: #cf222e;
+    border: 1px solid rgba(207, 34, 46, 0.22);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chipFunctional {
+    background-color: rgba(183, 76, 2, 0.08);
+    color: #b74c02;
+    border: 1px solid rgba(183, 76, 2, 0.22);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chipAdded {
+    background-color: rgba(26, 127, 55, 0.08);
+    color: #1a7f37;
+    border: 1px solid rgba(26, 127, 55, 0.22);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chipMetadata {
+    background-color: rgba(130, 80, 223, 0.08);
+    color: #8250df;
+    border: 1px solid rgba(130, 80, 223, 0.22);
+    border-radius: 6px;
+    padding: 4px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* ---- Export buttons ---- */
+QPushButton#exportButton {
+    background-color: #f6f8fa;
+    border: 1px solid #d0d7de;
+    color: #57606a;
+    font-size: 12px;
+    padding: 5px 12px;
+}
+QPushButton#exportButton:hover {
+    background-color: #eaeef2;
+    color: #24292f;
+}
+QPushButton#exportButtonPrimary {
+    background-color: #dafbe1;
+    border: 1px solid #1a7f37;
+    color: #1a7f37;
+    font-size: 12px;
+    padding: 5px 12px;
+}
+QPushButton#exportButtonPrimary:hover {
+    background-color: #1a7f37;
+    color: #ffffff;
+}
+
+/* ---- Summary wrap & filter bar ---- */
+QFrame#summaryWrap {
+    background-color: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+}
+QFrame#filterBar {
+    background-color: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+}
+QFrame#modePageCard {
+    background-color: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 12px;
 }
 """
 
