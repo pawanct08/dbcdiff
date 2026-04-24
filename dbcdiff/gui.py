@@ -1731,7 +1731,7 @@ class ViewerDialog(QDialog):
         fr.addStretch()
         lay.addLayout(fr)
 
-        cols = ["Frame ID", "Name", "DLC", "Cycle Time (ms)", "Signals", "Comment"]
+        cols = ["Frame ID", "Name", "Protocol", "Msg Subtype", "DLC", "Cycle (ms)", "Sender", "Signals", "Comment"]
         tbl = QTableWidget(0, len(cols))
         tbl.setHorizontalHeaderLabels(cols)
         tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1742,6 +1742,7 @@ class ViewerDialog(QDialog):
         lay.addWidget(tbl)
 
         def _fill(sender_filter: str = "") -> None:
+            from dbcdiff.protocol import classify_protocol, classify_subtype
             msgs = sorted(self._db.messages, key=lambda m: m.frame_id)
             if sender_filter and sender_filter != "(All senders)":
                 msgs = [m for m in msgs if sender_filter in (m.senders or [])]
@@ -1749,11 +1750,17 @@ class ViewerDialog(QDialog):
             tbl.setRowCount(len(msgs))
             for row, m in enumerate(msgs):
                 cycle = str(m.cycle_time) if m.cycle_time else ""
+                proto   = classify_protocol(m)
+                subtype = classify_subtype(m)
+                sender  = ", ".join(m.senders or [])
                 for col, val in enumerate([
-                    f"0x{m.frame_id:X}",
+                    f"0x{m.frame_id:03X}",
                     m.name,
+                    proto,
+                    subtype,
                     str(m.length),
                     cycle,
+                    sender,
                     str(len(m.signals)),
                     m.comment or "",
                 ]):
@@ -1784,7 +1791,7 @@ class ViewerDialog(QDialog):
         fr.addStretch()
         lay.addLayout(fr)
 
-        cols = ["Signal", "Message", "Start Bit", "Length", "Byte Order",
+        cols = ["Signal", "Message", "Protocol", "Start Bit", "Length", "Byte Order",
                 "Scale", "Offset", "Unit", "Min", "Max", "Comment"]
         tbl = QTableWidget(0, len(cols))
         tbl.setHorizontalHeaderLabels(cols)
@@ -1796,15 +1803,17 @@ class ViewerDialog(QDialog):
         lay.addWidget(tbl)
 
         def _fill(_idx: int = 0) -> None:
+            from dbcdiff.protocol import classify_protocol
             filter_name: str = msg_cb.currentData() or ""
             rows: list[tuple] = []
             for m in sorted(self._db.messages, key=lambda m: m.name):
                 if filter_name and m.name != filter_name:
                     continue
+                proto = classify_protocol(m)
                 for s in sorted(m.signals, key=lambda s: s.name):
                     bo = "Intel" if "little" in str(s.byte_order).lower() else "Motorola"
                     rows.append((
-                        s.name, m.name, str(s.start), str(s.length), bo,
+                        s.name, m.name, proto, str(s.start), str(s.length), bo,
                         str(s.scale), str(s.offset), s.unit or "",
                         str(s.minimum) if s.minimum is not None else "",
                         str(s.maximum) if s.maximum is not None else "",
