@@ -52,9 +52,9 @@ _SEV_COLOUR = {
     Severity.METADATA:   "yellow",
 }
 _SEV_LABEL = {
-    Severity.BREAKING:   "🔴 BREAKING",
-    Severity.FUNCTIONAL: "🟠 FUNCTIONAL",
-    Severity.METADATA:   "🟡 METADATA",
+    Severity.BREAKING:   "🔴 CRITICAL",
+    Severity.FUNCTIONAL: "🟠 WARNING",
+    Severity.METADATA:   "🟡 INFO",
 }
 _KIND_LABEL = {
     ADDED:   "➕ ADDED",
@@ -65,9 +65,9 @@ _KIND_LABEL = {
 
 # Plain-text (ASCII-safe) equivalents used when colour/emoji output is disabled
 _SEV_LABEL_PLAIN = {
-    Severity.BREAKING:   "BREAKING",
-    Severity.FUNCTIONAL: "FUNCTIONAL",
-    Severity.METADATA:   "METADATA",
+    Severity.BREAKING:   "CRITICAL",
+    Severity.FUNCTIONAL: "WARNING",
+    Severity.METADATA:   "INFO",
 }
 _KIND_LABEL_PLAIN = {
     ADDED:   "ADDED",

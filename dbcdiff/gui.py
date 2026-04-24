@@ -56,10 +56,10 @@ from .reporters.json_reporter import write_json
 # Severity display map  (enum name → display_label, bg, fg)
 # ---------------------------------------------------------------------------
 _SEV_MAP: dict[str, tuple[str, str, str]] = {
-    "BREAKING":   ("Breaking",   "#ff453a18", "#ff453a"),
-    "FUNCTIONAL": ("Functional", "#ff9f0a18", "#ff9f0a"),
-    "METADATA":   ("Metadata",   "#bf5af218", "#bf5af2"),
-    "INFO":       ("Info",       "#a1a1a618", "#a1a1a6"),
+    "BREAKING":   ("Critical",  "#ff453a18", "#ff453a"),
+    "FUNCTIONAL": ("Warning",   "#ff9f0a18", "#ff9f0a"),
+    "METADATA":   ("Info",      "#bf5af218", "#bf5af2"),
+    "INFO":       ("Info",      "#a1a1a618", "#a1a1a6"),
 }
 
 def _sev_display(sev: Severity) -> str:
@@ -538,11 +538,11 @@ class DBCDropZone(QFrame):
 
 class SummaryBadge(QWidget):
     _CARD_DEFS = [
-        ("BREAKING",   "BREAKING",   "#ff453a"),
-        ("FUNCTIONAL", "FUNCTIONAL", "#ff9f0a"),
-        ("added",      "ADDED",      "#30d158"),
-        ("removed",    "REMOVED",    "#3478f6"),
-        ("METADATA",   "METADATA",   "#bf5af2"),
+        ("BREAKING",   "CRITICAL",  "#ff453a"),
+        ("FUNCTIONAL", "WARNING",   "#ff9f0a"),
+        ("added",      "ADDED",     "#30d158"),
+        ("removed",    "REMOVED",   "#3478f6"),
+        ("METADATA",   "INFO",      "#bf5af2"),
     ]
 
     def __init__(self, parent=None):

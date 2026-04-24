@@ -23,8 +23,11 @@ class Severity(IntEnum):
     FUNCTIONAL = 2   # run-time impact: scale, offset, cycle time
     BREAKING   = 3   # bus-level impact: bit position, DLC, frame-id
 
-    def label(self) -> str:          # e.g. "Metadata"
-        return self.name.capitalize()
+    def label(self) -> str:
+        return {1: 'Info', 2: 'Warning', 3: 'Critical'}[self.value]
+
+    def short_label(self) -> str:
+        return {1: 'INFO', 2: 'WARN', 3: 'CRIT'}[self.value]
 
 
 ADDED   = "added"

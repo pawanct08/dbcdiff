@@ -15,9 +15,9 @@ from ..engine import DiffEntry, Severity, max_severity, ADDED, REMOVED, CHANGED
 # ---------------------------------------------------------------------------
 
 _SEV_BADGE = {
-    Severity.BREAKING:   ('<span class="badge breaking">🔴 BREAKING</span>',   "breaking"),
-    Severity.FUNCTIONAL: ('<span class="badge functional">🟠 FUNCTIONAL</span>', "functional"),
-    Severity.METADATA:   ('<span class="badge metadata">🟡 METADATA</span>',   "metadata"),
+    Severity.BREAKING:   ('<span class="badge breaking">🔴 CRITICAL</span>',  "breaking"),
+    Severity.FUNCTIONAL: ('<span class="badge functional">🟠 WARNING</span>', "functional"),
+    Severity.METADATA:   ('<span class="badge metadata">🟡 INFO</span>',      "metadata"),
 }
 _KIND_BADGE = {
     ADDED:   '<span class="badge added">➕ ADDED</span>',
