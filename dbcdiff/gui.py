@@ -102,13 +102,21 @@ def _esc(s: str) -> str:
 
 
 _STYLE_PATH = Path(__file__).resolve().parent.parent / "resources" / "style.qss"
+_DARK_MODE: bool = True
 
 
 def _load_app_stylesheet() -> str:
     try:
         return _STYLE_PATH.read_text(encoding="utf-8")
     except OSError:
-        return _QSS_DARK
+        return _QSS_DARK if _DARK_MODE else _QSS_LIGHT
+
+
+def toggle_theme(app: QApplication) -> None:
+    """Toggle between dark and light themes and re-apply the stylesheet."""
+    global _DARK_MODE
+    _DARK_MODE = not _DARK_MODE
+    app.setStyleSheet(_load_app_stylesheet())
 
 
 def _apply_app_theme(app: QApplication) -> None:
@@ -3451,6 +3459,12 @@ class MainWindow(QMainWindow):
             btn.setObjectName(obj_name)
             btn.clicked.connect(handler)
             topbar_layout.addWidget(btn)
+
+        self._theme_btn = QPushButton("☀" if _DARK_MODE else "🌑")
+        self._theme_btn.setFixedSize(32, 32)
+        self._theme_btn.setToolTip("Toggle light / dark theme")
+        self._theme_btn.clicked.connect(self._on_toggle_theme)
+        topbar_layout.addWidget(self._theme_btn)
         main.addWidget(topbar)
 
         summary_card = QFrame()
@@ -3715,6 +3729,10 @@ class MainWindow(QMainWindow):
         self._update_msg_type_list()
         self._update_protocol_list()
         self._update_ecu_node_list()
+
+    def _on_toggle_theme(self) -> None:
+        toggle_theme(QApplication.instance())
+        self._theme_btn.setText("🌑" if _DARK_MODE else "☀")
 
     def _on_compare_error(self, msg: str):
         self._compare_btn.setEnabled(True)
