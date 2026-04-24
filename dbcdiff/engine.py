@@ -1025,10 +1025,14 @@ def compare_three_way(db_base, db_a, db_b,
 
 #: Supported baud rates displayed in the UI dropdown
 BAUD_RATES: dict[str, int] = {
-    "125k":  125_000,
-    "250k":  250_000,
-    "500k":  500_000,
-    "1M":  1_000_000,
+    '125k':       125_000,
+    '250k':       250_000,
+    '500k':       500_000,
+    '1M':       1_000_000,
+    '2M CAN FD':  2_000_000,
+    '5M CAN FD':  5_000_000,
+    '10M CAN FD': 10_000_000,
+    '10M CAN XL': 10_000_000,
 }
 
 
@@ -1045,8 +1049,18 @@ def compute_bus_load(db, baud_rate: int) -> list[dict]:
     for m in db.messages:
         if not m.cycle_time or m.cycle_time <= 0:
             continue  # aperiodic / event-triggered — skip
-        is_ext = m.is_extended_frame
-        overhead = 67 if is_ext else 47
+        proto = classify_protocol(m)
+        if proto == 'CAN XL':
+            # CAN XL: 64-bit header + 16-bit footer; data up to 4096 bytes
+            overhead = 80
+        elif proto == 'CAN FD':
+            # CAN FD: same SOF/EOF structure as CAN 2.0 but wider payload;
+            # cantools .length already gives actual bytes (not DLC code)
+            overhead = 67 if m.is_extended_frame else 47
+        elif m.is_extended_frame:  # J1939 / CAN 2.0B extended 29-bit ID
+            overhead = 67
+        else:                       # CAN 2.0A standard 11-bit ID
+            overhead = 47
         frame_bits = overhead + 8 * m.length
         cycle_s = m.cycle_time / 1000.0               # ms → s
         load_pct = (frame_bits / baud_rate) / cycle_s * 100.0
@@ -1057,7 +1071,8 @@ def compute_bus_load(db, baud_rate: int) -> list[dict]:
             "cycle_ms":    m.cycle_time,
             "frame_bits":  frame_bits,
             "load_pct":    load_pct,
-            "is_extended": is_ext,
+            "is_extended": m.is_extended_frame,
+            "proto":       proto,
         })
     results.sort(key=lambda r: r["load_pct"], reverse=True)
     return results
